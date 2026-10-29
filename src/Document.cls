@@ -21,6 +21,10 @@ Parameter SCHEMACLASS = "JVDoc.DocSchema";
 /// Maximum length of a single value written to the search table; truncated if exceeded (must not exceed PropValue.MAXLEN)
 Parameter SEARCHVALUEMAXLEN = 200;
 
+/// Longest value GetValuesArray stores as a pArray subscript; longer values are cut there and also returned in full in pLongArray.
+/// Same as the product's $$$MAXEDIARRAYSUBSCRIPT used by the HL7 and XML virtual documents
+Parameter VALUESUBSCRIPTMAXLEN = 230;
+
 /// Fallback search table class when none is registered for the DocType (subclasses may override); empty means no indexing
 Parameter SEARCHTABLE;
 
@@ -46,6 +50,9 @@ Property TypedJT As %String [ Private, Transient ];
 /// Set by %OnBeforeSave when the search table rows must be rebuilt after the save
 Property NeedsIndex As %Boolean [ InitialExpression = 0, Private, Transient ];
 
+/// Set by %OnAddToSaveSet when it wrote a modified Obj back to Raw, so that %OnBeforeSave still knows the content changed
+Property ContentChanged As %Boolean [ InitialExpression = 0, Private, Transient ];
+
 /// DocType the stored search table rows were built for; empty until the document has been indexed or opened
 Property IndexedDocType As %String [ Private, Transient ];
 
@@ -59,18 +66,42 @@ Index DocTypeIndex On DocType;
 /// Returns: error when copying the stream fails
 Method %OnNew(pInit = "") As %Status [ Private, ServerOnly = 1 ]
 {
-    Set sc = $$$OK
+    Set tSC = $$$OK
     If $IsObject(pInit) {
-        Set cls = $ClassName(pInit)
-        If (cls = "%Library.DynamicObject") || (cls = "%Library.DynamicArray") {
+        Set tCls = $ClassName(pInit)
+        If (tCls = "%Library.DynamicObject") || (tCls = "%Library.DynamicArray") {
             Set ..Obj = pInit, ..Dirty = 1
         } Else {
-            Set sc = ..Raw.CopyFrom(pInit)
+            Set tSC = ..Raw.CopyFrom(pInit)
         }
     } ElseIf pInit '= "" {
         Do ..Raw.Write(pInit)
     }
-    Quit sc
+    Quit tSC
+}
+
+/// Creates a document from JSON and sets its DocType in one call. The JSON is parsed here, so malformed input is reported at once
+/// instead of on the first path access; the parsed object is cached without marking the document dirty, so Raw is still saved unchanged.<br>
+/// <var>pJSON</var>: the JSON as a string, a character stream (copied, not consumed), or a %DynamicObject; the root must be a JSON object<br>
+/// <var>pDocType</var>: the DocType "Cat:Name"; "" leaves it unset. It is not checked against JVDoc.SchemaDef<br>
+/// <var>pStatus</var> (output): $$$OK, or the error when the document cannot be created, the JSON does not parse or its root is not an object<br>
+/// Returns: the new unsaved document, or "" on error
+ClassMethod Create(pJSON, pDocType As %String = "", Output pStatus As %Status) As JVDoc.Document
+{
+    Set pStatus = $$$OK
+    Set tDoc = ..%New(pJSON)
+    If '$IsObject(tDoc) {
+        Set pStatus = $Get(%objlasterror, $$$ERROR($$$GeneralError, "Cannot create document"))
+        Quit ""
+    }
+    Set tObj = tDoc.GetObj(.pStatus)
+    If $$$ISERR(pStatus) Quit ""
+    If $ClassName(tObj) '= "%Library.DynamicObject" {
+        Set pStatus = $$$ERROR($$$GeneralError, "The root of a JVDoc document must be a JSON object")
+        Quit ""
+    }
+    Set tDoc.DocType = pDocType
+    Quit tDoc
 }
 
 /// Returns the parsed document, parsing Raw on first access; an empty Raw gives an empty object {}.<br>
@@ -88,8 +119,8 @@ Method GetObj(Output pSC As %Status) As %DynamicAbstractObject
             } Else {
                 Set ..Obj = {}
             }
-        } Catch ex {
-            Set pSC = ex.AsStatus()
+        } Catch tEx {
+            Set pSC = tEx.AsStatus()
         }
     }
     Quit ..Obj
@@ -100,10 +131,10 @@ Method GetObj(Output pSC As %Status) As %DynamicAbstractObject
 /// Returns: the JSON text (at most $$$MaxLocalLength characters)
 ClassMethod ToJSONString(pObj) As %String [ Private ]
 {
-    Set s = ##class(%Stream.TmpCharacter).%New()
-    Do pObj.%ToJSON(s)
-    Do s.Rewind()
-    Quit s.Read($$$MaxLocalLength)
+    Set tS = ##class(%Stream.TmpCharacter).%New()
+    Do pObj.%ToJSON(tS)
+    Do tS.Rewind()
+    Quit tS.Read($$$MaxLocalLength)
 }
 
 /// Deep-copies a dynamic entity by serializing it to JSON text and parsing the result.<br>
@@ -121,9 +152,9 @@ ClassMethod CloneDyn(pObj)
 /// Returns: the bare path, e.g. "items(1).sku"
 ClassMethod Clean(pPath As %String) As %String [ Private ]
 {
-    Set p = $ZStrip(pPath, "<>W")
-    If ($Extract(p) = "{") && ($Extract(p, *) = "}") Set p = $Extract(p, 2, *-1)
-    Quit p
+    Set tP = $ZStrip(pPath, "<>W")
+    If ($Extract(tP) = "{") && ($Extract(tP, *) = "}") Set tP = $Extract(tP, 2, *-1)
+    Quit tP
 }
 
 /// Parses a VDoc path into segments.<br>
@@ -134,24 +165,24 @@ ClassMethod Clean(pPath As %String) As %String [ Private ]
 ClassMethod ParsePath(pPath As %String, Output pSegs, pKey As %String = "") As %Status
 {
     Kill pSegs
-    Set path = ..Clean(pPath), len = $Length(path), i = 1, n = 0, k = 0
-    While i <= len {
-        Set name = "", idx = "", paren = 0
-        While i <= len {
-            Set c = $Extract(path, i)
-            If (c = ".") || (c = "(") Quit
-            Set name = name_c, i = i+1
+    Set tPath = ..Clean(pPath), tLen = $Length(tPath), tI = 1, tN = 0, tK = 0
+    While tI <= tLen {
+        Set tName = "", tIdx = "", tParen = 0
+        While tI <= tLen {
+            Set tC = $Extract(tPath, tI)
+            If (tC = ".") || (tC = "(") Quit
+            Set tName = tName_tC, tI = tI+1
         }
-        If (i <= len) && ($Extract(path, i) = "(") {
-            Set close = $Find(path, ")", i)
-            If 'close Quit
-            Set idx = $Extract(path, i+1, close-2), paren = 1, i = close
-            If (idx = "") && (pKey '= "") { Set k = k+1, idx = $Piece(pKey, ",", k) }
+        If (tI <= tLen) && ($Extract(tPath, tI) = "(") {
+            Set tClose = $Find(tPath, ")", tI)
+            If 'tClose Quit
+            Set tIdx = $Extract(tPath, tI+1, tClose-2), tParen = 1, tI = tClose
+            If (tIdx = "") && (pKey '= "") { Set tK = tK+1, tIdx = $Piece(pKey, ",", tK) }
         }
-        If (i <= len) && ($Extract(path, i) = ".") Set i = i+1
-        Set n = n+1, pSegs(n) = $ListBuild(name, paren, idx)
+        If (tI <= tLen) && ($Extract(tPath, tI) = ".") Set tI = tI+1
+        Set tN = tN+1, pSegs(tN) = $ListBuild(tName, tParen, tIdx)
     }
-    If i <= len Quit $$$ERROR($$$GeneralError, "Malformed path: "_pPath)
+    If tI <= tLen Quit $$$ERROR($$$GeneralError, "Malformed path: "_pPath)
     Quit $$$OK
 }
 
@@ -160,12 +191,12 @@ ClassMethod ParsePath(pPath As %String, Output pSegs, pKey As %String = "") As %
 /// Returns: the normalized path, e.g. "items().qty"; "" for a malformed path
 ClassMethod NormPath(pPath As %String) As %String
 {
-    If $$$ISERR(..ParsePath(pPath, .segs)) Quit ""
-    Set norm = "", n = $Order(segs(""), -1)
-    For i = 1:1:n {
-        Set norm = norm_$Select(norm = "":"", 1:".")_$List(segs(i), 1)_$Select($List(segs(i), 2):"()", 1:"")
+    If $$$ISERR(..ParsePath(pPath, .tSegs)) Quit ""
+    Set tNorm = "", tN = $Order(tSegs(""), -1)
+    For tI = 1:1:tN {
+        Set tNorm = tNorm_$Select(tNorm = "":"", 1:".")_$List(tSegs(tI), 1)_$Select($List(tSegs(tI), 2):"()", 1:"")
     }
-    Quit norm
+    Quit tNorm
 }
 
 /// Advances one path segment.<br>
@@ -176,51 +207,52 @@ ClassMethod NormPath(pPath As %String) As %String
 ClassMethod Step(pCur, pSeg As %List, Output pType As %String) [ Private ]
 {
     Set pType = "unassigned"
-    Set name = $List(pSeg, 1), paren = $List(pSeg, 2), idx = $List(pSeg, 3)
-    Set val = pCur
-    If name '= "" {
+    Set tName = $List(pSeg, 1), tParen = $List(pSeg, 2), tIdx = $List(pSeg, 3)
+    Set tVal = pCur
+    If tName '= "" {
         If '$IsObject(pCur) || ($ClassName(pCur) '= "%Library.DynamicObject") Quit ""
-        Set t = pCur.%GetTypeOf(name)
-        If t = "unassigned" Quit ""
-        Set val = pCur.%Get(name), pType = t
+        Set tT = pCur.%GetTypeOf(tName)
+        If tT = "unassigned" Quit ""
+        Set tVal = pCur.%Get(tName), pType = tT
     } ElseIf $IsObject(pCur) && ($ClassName(pCur) = "%Library.DynamicArray") {
         Set pType = "array"
     }
-    If 'paren Quit val
+    If 'tParen Quit tVal
     If pType '= "array" { Set pType = "unassigned" Quit "" }
-    If idx = "" Quit val
-    Set i = +idx - 1
-    If (i < 0) || (i >= val.%Size()) { Set pType = "unassigned" Quit "" }
-    Set pType = val.%GetTypeOf(i)
-    Quit val.%Get(i)
+    If tIdx = "" Quit tVal
+    Set tI = +tIdx - 1
+    If (tI < 0) || (tI >= tVal.%Size()) { Set pType = "unassigned" Quit "" }
+    Set pType = tVal.%GetTypeOf(tI)
+    Quit tVal.%Get(tI)
 }
 
 /// Walks the parsed document along a path.<br>
 /// <var>pPath</var>: VDoc path; "" addresses the root<br>
 /// <var>pType</var> (output): JSON type of the value found, or "unassigned" when the path does not resolve<br>
 /// <var>pCount</var> (output): 1 when the path ends in a bare (), meaning the caller should report the element count of the returned array<br>
-/// <var>pSC</var> (output): parse or path error; "Path not found" when a segment is missing or an intermediate value is not an object or array<br>
+/// <var>pSC</var> (output): parse or path error; "Path not found: path (No segment found)" when a segment is missing or an intermediate value is not an object or array; the "No segment found" part is what lets DTL ignore it under IGNOREMISSINGSOURCE<br>
 /// Returns: the value at the path (dynamic entity for objects and arrays); "" when not found
 Method Locate(pPath As %String, Output pType As %String, Output pCount As %Boolean, Output pSC As %Status) [ Private ]
 {
     Set pType = "unassigned", pCount = 0
-    Set cur = ..GetObj(.pSC)
+    Set tCur = ..GetObj(.pSC)
     If $$$ISERR(pSC) Quit ""
-    Set pSC = ..ParsePath(pPath, .segs)
+    Set pSC = ..ParsePath(pPath, .tSegs)
     If $$$ISERR(pSC) Quit ""
-    Set n = $Order(segs(""), -1)
-    If n = 0 { Set pType = $Select($ClassName(cur) = "%Library.DynamicArray":"array", 1:"object") Quit cur }
-    For i = 1:1:n {
-        Set val = ..Step(cur, segs(i), .pType)
-        If (pType = "unassigned") || ((i < n) && (pType '= "object") && (pType '= "array")) {
-            Set pType = "unassigned", pSC = $$$ERROR($$$GeneralError, "Path not found: "_pPath)
+    Set tN = $Order(tSegs(""), -1)
+    If tN = 0 { Set pType = $Select($ClassName(tCur) = "%Library.DynamicArray":"array", 1:"object") Quit tCur }
+    For tI = 1:1:tN {
+        Set tVal = ..Step(tCur, tSegs(tI), .pType)
+        If (pType = "unassigned") || ((tI < tN) && (pType '= "object") && (pType '= "array")) {
+            // Generated DTL code honours IGNOREMISSINGSOURCE only for errors whose text contains "No segment found"
+            Set pType = "unassigned", pSC = $$$ERROR($$$GeneralError, "Path not found: "_pPath_" (No segment found)")
             Quit
         }
-        Set cur = val
+        Set tCur = tVal
     }
     If pType = "unassigned" Quit ""
-    Set pCount = ($List(segs(n), 2) && ($List(segs(n), 3) = ""))
-    Quit cur
+    Set pCount = ($List(tSegs(tN), 2) && ($List(tSegs(tN), 3) = ""))
+    Quit tCur
 }
 
 // ---------------- VDoc interface: reading ----------------
@@ -234,12 +266,12 @@ Method Locate(pPath As %String, Output pType As %String, Output pCount As %Boole
 /// Returns: the scalar value; objects and arrays as JSON text; null as ""; the element count for a bare ()
 Method GetValueAt(pPropertyPath As %String, pFormat As %String = "", Output pStatus As %Status, pTreatEmptyFieldAsNull As %Boolean = 0) As %String
 {
-    Set val = ..Locate(pPropertyPath, .type, .count, .pStatus)
+    Set tVal = ..Locate(pPropertyPath, .tType, .tCount, .pStatus)
     If $$$ISERR(pStatus) Quit ""
-    If count Quit val.%Size()
-    If (type = "object") || (type = "array") Quit ..ToJSONString(val)
-    If type = "null" Quit ""
-    Quit val
+    If tCount Quit tVal.%Size()
+    If (tType = "object") || (tType = "array") Quit ..ToJSONString(tVal)
+    If tType = "null" Quit ""
+    Quit tVal
 }
 
 /// Returns the value at a path together with its real JSON type; used for type-aware copying between JVDoc documents.<br>
@@ -249,13 +281,13 @@ Method GetValueAt(pPropertyPath As %String, pFormat As %String = "", Output pSta
 /// Returns: the scalar value, a deep copy for objects and arrays, "" for null, or the element count
 Method GetTypedAt(pPath As %String, Output pJType As %String, Output pSC As %Status)
 {
-    Set val = ..Locate(pPath, .type, .count, .pSC)
-    Set pJType = type
+    Set tVal = ..Locate(pPath, .tType, .tCount, .pSC)
+    Set pJType = tType
     If $$$ISERR(pSC) Quit ""
-    If count { Set pJType = "number"  Quit val.%Size() }
-    If (type = "object") || (type = "array") Quit ..CloneDyn(val)
-    If type = "null" Quit ""
-    Quit val
+    If tCount { Set pJType = "number"  Quit tVal.%Size() }
+    If (tType = "object") || (tType = "array") Quit ..CloneDyn(tVal)
+    If tType = "null" Quit ""
+    Quit tVal
 }
 
 /// Iterates the array at a path; drives the () expansion in CopyValues and search table indexing (Ens.VDoc.Interface).<br>
@@ -265,12 +297,53 @@ Method GetTypedAt(pPath As %String, Output pJType As %String, Output pSC As %Sta
 /// Returns: the next 1-based index, or "" at the end, when the path is missing or when it is not an array
 Method GetNextIndex(pPath As %String, pIndex As %String = "", ByRef pStatus As %Status = {$$$OK}) As %String
 {
-    Set p = ..Clean(pPath)
-    If $Extract(p, *-1, *) = "()" Set p = $Extract(p, 1, *-2)
-    Set arr = ..Locate(p, .type, .count, .pStatus)
-    If $$$ISERR(pStatus) || (type '= "array") Quit ""
-    Set next = $Select(pIndex = "":1, 1:pIndex+1)
-    Quit $Select(next <= arr.%Size():next, 1:"")
+    Set tP = ..Clean(pPath)
+    If $Extract(tP, *-1, *) = "()" Set tP = $Extract(tP, 1, *-2)
+    Set tArr = ..Locate(tP, .tType, .tCount, .pStatus)
+    If $$$ISERR(pStatus) || (tType '= "array") Quit ""
+    Set tNext = $Select(pIndex = "":1, 1:pIndex+1)
+    Quit $Select(tNext <= tArr.%Size():tNext, 1:"")
+}
+
+/// Returns every value at a path, expanding each () to all array elements (Ens.VDoc.Interface); the Message Viewer calls it to
+/// filter and display messages by a VDoc Property Path. Values are those of GetValueAt (objects and arrays as JSON text, booleans as 1/0);
+/// null and "" give no value. A path that does not exist in this document gives no values rather than an error, so such messages simply do not match.<br>
+/// <var>pPropertyPath</var>: VDoc path such as "order_id" or "items().sku"; outer {} and whitespace are allowed<br>
+/// <var>pFormat</var>: ignored<br>
+/// <var>pArray</var> (byref): cleared, then pArray(value)="" for each distinct value, cut to VALUESUBSCRIPTMAXLEN characters<br>
+/// <var>pStatus</var> (output): $$$OK, or the error when the path is malformed or the document does not parse<br>
+/// <var>pLongArray</var> (byref): cleared, then pLongArray(n) holds the full text of each value of VALUESUBSCRIPTMAXLEN characters or more, and pLongArray their count
+Method GetValuesArray(pPropertyPath As %String, pFormat As %String = "", ByRef pArray As %String, Output pStatus As %Status, ByRef pLongArray As %String)
+{
+    Kill pArray, pLongArray
+    Set tPath = ..Clean(pPropertyPath)
+    Set pStatus = ..ParsePath(tPath, .tSegs)
+    If $$$ISOK(pStatus) Do ..GetObj(.pStatus)
+    If $$$ISERR(pStatus) Quit
+    Do ..CollectAllValues(tPath, .pArray, .pLongArray)
+}
+
+/// Recursively walks a path for GetValuesArray, expanding the first () into all array elements and recursing on the rest.<br>
+/// <var>pPath</var>: cleaned, well-formed path, possibly with ()<br>
+/// <var>pArray</var> (byref): receives pArray(value)="", values cut to VALUESUBSCRIPTMAXLEN<br>
+/// <var>pLongArray</var> (byref): receives the full text of values of VALUESUBSCRIPTMAXLEN characters or more
+Method CollectAllValues(pPath As %String, ByRef pArray As %String, ByRef pLongArray As %String) [ Private ]
+{
+    Set tP = $Find(pPath, "()")
+    If 'tP {
+        Set tVal = ..GetValueAt(pPath, , .tSC)
+        If $$$ISERR(tSC) || (tVal = "") Quit
+        If $Length(tVal) >= ..#VALUESUBSCRIPTMAXLEN Set pLongArray($Increment(pLongArray)) = tVal
+        Set pArray($Extract(tVal, 1, ..#VALUESUBSCRIPTMAXLEN)) = ""
+        Quit
+    }
+    Set tHead = $Extract(pPath, 1, tP-3), tTail = $Extract(pPath, tP, *)
+    Set tIdx = ""
+    For {
+        Set tIdx = ..GetNextIndex(tHead_"()", tIdx, .tNsc)
+        If $$$ISERR(tNsc) || (tIdx = "") Quit
+        Do ..CollectAllValues(tHead_"("_tIdx_")"_tTail, .pArray, .pLongArray)
+    }
 }
 
 // ---------------- VDoc interface: writing ----------------
@@ -285,53 +358,53 @@ Method GetNextIndex(pPath As %String, pIndex As %String = "", ByRef pStatus As %
 Method SetValueAt(pValue As %String, pPropertyPath As %String, pAction As %String = "set", pKey As %String = "") As %Status
 {
     If '..IsMutable Quit $$$ERROR($$$GeneralError, "Document is not mutable")
-    Set cur = ..GetObj(.sc)
-    If $$$ISERR(sc) Quit sc
-    Set sc = ..ParsePath(pPropertyPath, .segs, pKey)
-    If $$$ISERR(sc) Quit sc
-    Set n = $Order(segs(""), -1)
-    If n = 0 Quit $$$ERROR($$$GeneralError, "Empty path")
-    Set action = $ZConvert(pAction, "L")
-    If (action = "remove") || (action = "clear") {
-        If ..RemoveAt(cur, .segs, n) Set ..Dirty = 1
+    Set tCur = ..GetObj(.tSC)
+    If $$$ISERR(tSC) Quit tSC
+    Set tSC = ..ParsePath(pPropertyPath, .tSegs, pKey)
+    If $$$ISERR(tSC) Quit tSC
+    Set tN = $Order(tSegs(""), -1)
+    If tN = 0 Quit $$$ERROR($$$GeneralError, "Empty path")
+    Set tAction = $ZConvert(pAction, "L")
+    If (tAction = "remove") || (tAction = "clear") {
+        If ..RemoveAt(tCur, .tSegs, tN) Set ..Dirty = 1
         Quit $$$OK
     }
     Try {
-        Set norm = ""
-        For i = 1:1:n {
-            Set paren = $List(segs(i), 2), idx = $List(segs(i), 3)
-            If paren && ((idx '= "") || (i < n)) && (+idx < 1) Throw ##class(%Exception.General).%New("BadIndex", 5001, , "index must be >= 1: "_pPropertyPath)
-            Set norm = norm_$Select(norm = "":"", 1:".")_$List(segs(i), 1)_$Select(paren:"()", 1:"")
+        Set tNorm = ""
+        For tI = 1:1:tN {
+            Set tParen = $List(tSegs(tI), 2), tIdx = $List(tSegs(tI), 3)
+            If tParen && ((tIdx '= "") || (tI < tN)) && (+tIdx < 1) Throw ##class(%Exception.General).%New("BadIndex", 5001, , "index must be >= 1: "_pPropertyPath)
+            Set tNorm = tNorm_$Select(tNorm = "":"", 1:".")_$List(tSegs(tI), 1)_$Select(tParen:"()", 1:"")
         }
-        Set name = $List(segs(n), 1), paren = $List(segs(n), 2), idx = $List(segs(n), 3)
-        If (action = "append") && 'paren Set paren = 1, idx = "", norm = norm_"()"
-        Set vt = ##class(JVDoc.Schema).TypeAt(..DocType, norm)
-        If (vt = "any") && (..TypedJT '= "") Set vt = "@"_..TypedJT
-        Set val = ..Coerce(pValue, vt, .jt)
+        Set tName = $List(tSegs(tN), 1), tParen = $List(tSegs(tN), 2), tIdx = $List(tSegs(tN), 3)
+        If (tAction = "append") && 'tParen Set tParen = 1, tIdx = "", tNorm = tNorm_"()"
+        Set tVt = ##class(JVDoc.Schema).TypeAt(..DocType, tNorm)
+        If (tVt = "any") && (..TypedJT '= "") Set tVt = "@"_..TypedJT
+        Set tVal = ..Coerce(pValue, tVt, .tJt)
         // From here on a PathConflict can only come from a node that already existed, so nothing has been created yet when it is thrown
-        For i = 1:1:n-1 {
-            If $List(segs(i), 2) {
-                Set cur = ..EnsureElem(..ArrayAt(cur, $List(segs(i), 1)), +$List(segs(i), 3))
+        For tI = 1:1:tN-1 {
+            If $List(tSegs(tI), 2) {
+                Set tCur = ..EnsureElem(..ArrayAt(tCur, $List(tSegs(tI), 1)), +$List(tSegs(tI), 3))
             } Else {
-                Set cur = ..EnsureChild(cur, $List(segs(i), 1), "{}")
+                Set tCur = ..EnsureChild(tCur, $List(tSegs(tI), 1), "{}")
             }
         }
-        If paren {
-            Set arr = ..ArrayAt(cur, name)
-            If idx = "" {
-                Do ..Store(arr, "", val, jt, 1)                  // name() means append
+        If tParen {
+            Set tArr = ..ArrayAt(tCur, tName)
+            If tIdx = "" {
+                Do ..Store(tArr, "", tVal, tJt, 1)                  // name() means append
             } Else {
-                While arr.%Size() < +idx { Do arr.%Push("", "null") }
-                Do ..Store(arr, +idx-1, val, jt)
+                While tArr.%Size() < +tIdx { Do tArr.%Push("", "null") }
+                Do ..Store(tArr, +tIdx-1, tVal, tJt)
             }
         } Else {
-            Do ..Store(cur, name, val, jt)
+            Do ..Store(tCur, tName, tVal, tJt)
         }
         Set ..Dirty = 1
-    } Catch ex {
-        Set sc = ex.AsStatus()
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Writes a value with a given JSON type: fields declared any (or not in the field tree) take pJType as-is; other fields are still coerced by their declared type.<br>
@@ -345,12 +418,12 @@ Method SetTypedAt(pVal, pJType As %String, pPath As %String, pAction As %String 
 {
     Set ..TypedJT = pJType
     Try {
-        Set sc = ..SetValueAt(pVal, pPath, pAction, pKey)
-    } Catch ex {
-        Set sc = ex.AsStatus()
+        Set tSC = ..SetValueAt(pVal, pPath, pAction, pKey)
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
     Set ..TypedJT = ""
-    Quit sc
+    Quit tSC
 }
 
 /// Removes the node at a parsed path without creating anything on the way; "name(k)" removes element k, "name" and "name()" remove the property itself.<br>
@@ -360,26 +433,26 @@ Method SetTypedAt(pVal, pJType As %String, pPath As %String, pAction As %String 
 /// Returns: 1 when a node was removed, 0 when the path did not exist
 ClassMethod RemoveAt(pRoot, ByRef pSegs, pN As %Integer) As %Boolean [ Private ]
 {
-    Set cur = pRoot, t = $Select($ClassName(cur) = "%Library.DynamicArray":"array", 1:"object")
-    For i = 1:1:pN-1 {
-        Set cur = ..Step(cur, pSegs(i), .t)
-        If (t '= "object") && (t '= "array") Quit
+    Set tCur = pRoot, tT = $Select($ClassName(tCur) = "%Library.DynamicArray":"array", 1:"object")
+    For tI = 1:1:pN-1 {
+        Set tCur = ..Step(tCur, pSegs(tI), .tT)
+        If (tT '= "object") && (tT '= "array") Quit
     }
-    If (t '= "object") && (t '= "array") Quit 0
-    Set name = $List(pSegs(pN), 1), paren = $List(pSegs(pN), 2), idx = $List(pSegs(pN), 3)
-    If paren && (idx '= "") {
-        If name = "" {
-            Set arr = cur
+    If (tT '= "object") && (tT '= "array") Quit 0
+    Set tName = $List(pSegs(pN), 1), tParen = $List(pSegs(pN), 2), tIdx = $List(pSegs(pN), 3)
+    If tParen && (tIdx '= "") {
+        If tName = "" {
+            Set tArr = tCur
         } Else {
-            Set arr = ..Step(cur, $ListBuild(name, 0, ""), .t)
-            If t '= "array" Quit 0
+            Set tArr = ..Step(tCur, $ListBuild(tName, 0, ""), .tT)
+            If tT '= "array" Quit 0
         }
-        If (+idx < 1) || (+idx > arr.%Size()) Quit 0
-        Do arr.%Remove(+idx-1)
+        If (+tIdx < 1) || (+tIdx > tArr.%Size()) Quit 0
+        Do tArr.%Remove(+tIdx-1)
         Quit 1
     }
-    If (name = "") || (t '= "object") || (cur.%GetTypeOf(name) = "unassigned") Quit 0
-    Do cur.%Remove(name)
+    If (tName = "") || (tT '= "object") || (tCur.%GetTypeOf(tName) = "unassigned") Quit 0
+    Do tCur.%Remove(tName)
     Quit 1
 }
 
@@ -402,14 +475,14 @@ ClassMethod ArrayAt(pCur, pName As %String) [ Private ]
 ClassMethod EnsureChild(pParent, pName As %String, pKind As %String) [ Private ]
 {
     If pName = "" Quit pParent
-    Set t = pParent.%GetTypeOf(pName)
-    If ((pKind = "{}") && (t = "object")) || ((pKind = "[]") && (t = "array")) Quit pParent.%Get(pName)
-    If (t '= "unassigned") && (t '= "null") {
-        Throw ##class(%Exception.General).%New("PathConflict", 5001, , pName_" exists with type "_t)
+    Set tT = pParent.%GetTypeOf(pName)
+    If ((pKind = "{}") && (tT = "object")) || ((pKind = "[]") && (tT = "array")) Quit pParent.%Get(pName)
+    If (tT '= "unassigned") && (tT '= "null") {
+        Throw ##class(%Exception.General).%New("PathConflict", 5001, , pName_" exists with type "_tT)
     }
-    If pKind = "{}" { Set new = {} } Else { Set new = [] }
-    Do pParent.%Set(pName, new)
-    Quit new
+    If pKind = "{}" { Set tNew = {} } Else { Set tNew = [] }
+    Do pParent.%Set(pName, tNew)
+    Quit tNew
 }
 
 /// Returns the object at an array index, padding the array with nulls and replacing a null element with {} when needed.<br>
@@ -420,9 +493,9 @@ ClassMethod EnsureElem(pArr, pIdx As %Integer) [ Private ]
 {
     If pIdx < 1 Throw ##class(%Exception.General).%New("BadIndex", 5001, , "index must be >= 1")
     While pArr.%Size() < pIdx { Do pArr.%Push("", "null") }
-    Set t = pArr.%GetTypeOf(pIdx-1)
-    If t '= "object" {
-        If t '= "null" Throw ##class(%Exception.General).%New("PathConflict", 5001, , "element "_pIdx_" is "_t)
+    Set tT = pArr.%GetTypeOf(pIdx-1)
+    If tT '= "object" {
+        If tT '= "null" Throw ##class(%Exception.General).%New("PathConflict", 5001, , "element "_pIdx_" is "_tT)
         Do pArr.%Set(pIdx-1, {})
     }
     Quit pArr.%Get(pIdx-1)
@@ -441,13 +514,13 @@ ClassMethod Coerce(pValue, pType As %String, Output pJType As %String) [ Private
         Quit pValue
     }
     If (pType = "object") || (pType = "array") || (pType = "any") {
-        Set v = ""
+        Set tV = ""
         If (pType '= "any") || ($Extract(pValue) = "{") || ($Extract(pValue) = "[") {
-            Try { Set v = ##class(%DynamicAbstractObject).%FromJSON(pValue) } Catch { Set v = "" }
+            Try { Set tV = ##class(%DynamicAbstractObject).%FromJSON(pValue) } Catch { Set tV = "" }
         }
-        If $IsObject(v) {
-            Set pJType = $Select($ClassName(v) = "%Library.DynamicArray":"array", 1:"object")
-            Quit v
+        If $IsObject(tV) {
+            Set pJType = $Select($ClassName(tV) = "%Library.DynamicArray":"array", 1:"object")
+            Quit tV
         }
         If pType '= "any" Throw ##class(%Exception.General).%New("BadJSON", 5001, , "value is not valid JSON for an "_pType_" field")
     }
@@ -502,29 +575,29 @@ Method CopyValues(pSource As Ens.VDoc.Interface, pSourcePath As %String, pTarget
 /// Returns: the first write error, or the missing-source error when pIgnoreMissing=0
 Method CopyExpand(pSource As Ens.VDoc.Interface, pSrc As %String, pTgt As %String, pAction As %String, pKey As %String, pIgnoreMissing As %Boolean) As %Status [ Private ]
 {
-    Set p = $Find(pSrc, "()")
-    If 'p {
+    Set tP = $Find(pSrc, "()")
+    If 'tP {
         // When both source and target are JVDoc.Document and the target field is 'any', copy with the source value's real JSON type without going through a string
         If pSource.%Extends("JVDoc.Document") && (##class(JVDoc.Schema).TypeAt(..DocType, ..NormPath(pTgt)) = "any") {
-            Set val = pSource.GetTypedAt(pSrc, .jt, .gsc)
-            If $$$ISERR(gsc) Quit $Select(pIgnoreMissing:$$$OK, 1:gsc)
-            Quit ..SetTypedAt(val, jt, pTgt, pAction, pKey)
+            Set tVal = pSource.GetTypedAt(pSrc, .tJt, .tGsc)
+            If $$$ISERR(tGsc) Quit $Select(pIgnoreMissing:$$$OK, 1:tGsc)
+            Quit ..SetTypedAt(tVal, tJt, pTgt, pAction, pKey)
         }
-        Set val = pSource.GetValueAt(pSrc, , .gsc)
-        If $$$ISERR(gsc) Quit $Select(pIgnoreMissing:$$$OK, 1:gsc)
-        Quit ..SetValueAt(val, pTgt, pAction, pKey)
+        Set tVal = pSource.GetValueAt(pSrc, , .tGsc)
+        If $$$ISERR(tGsc) Quit $Select(pIgnoreMissing:$$$OK, 1:tGsc)
+        Quit ..SetValueAt(tVal, pTgt, pAction, pKey)
     }
-    Set head = $Extract(pSrc, 1, p-3), tail = $Extract(pSrc, p, *)
-    Set idx = "", sc = $$$OK
+    Set tHead = $Extract(pSrc, 1, tP-3), tTail = $Extract(pSrc, tP, *)
+    Set tIdx = "", tSC = $$$OK
     For {
-        Set idx = pSource.GetNextIndex(head_"()", idx, .nsc)
-        If $$$ISERR(nsc) || (idx = "") Quit
-        Set tgt = pTgt, q = $Find(tgt, "()")
-        If q Set tgt = $Extract(tgt, 1, q-3)_"("_idx_")"_$Extract(tgt, q, *)
-        Set sc = ..CopyExpand(pSource, head_"("_idx_")"_tail, tgt, pAction, pKey, pIgnoreMissing)
-        If $$$ISERR(sc) Quit
+        Set tIdx = pSource.GetNextIndex(tHead_"()", tIdx, .tNsc)
+        If $$$ISERR(tNsc) || (tIdx = "") Quit
+        Set tTgt = pTgt, tQ = $Find(tTgt, "()")
+        If tQ Set tTgt = $Extract(tTgt, 1, tQ-3)_"("_tIdx_")"_$Extract(tTgt, tQ, *)
+        Set tSC = ..CopyExpand(pSource, tHead_"("_tIdx_")"_tTail, tTgt, pAction, pKey, pIgnoreMissing)
+        If $$$ISERR(tSC) Quit
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Gives the clone its own parse state: Obj and Dirty are reset so it re-parses from its own Raw, and unsaved changes of the source are serialized into the clone's Raw first.<br>
@@ -556,28 +629,28 @@ Method %OnConstructClone(pObject As %RegisteredObject, pDeep As %Boolean = 0, By
 ClassMethod GetContentArray(Output pContents, pMode As %String = "source", pDocType As %String = "", pLevel As %Integer = "", pIncludeBase As %Boolean = 0, pExtraDetails = 0) As %Status
 {
     // The editor passes pContents as a global reference name ("^IRIS.Temp..." or "%xxx"); results must be written to that reference
-    Set ref = $Get(pContents)
-    Set isRef = (("%" = $Extract(ref)) || ("^" = $Extract(ref)))
-    Set sc = $$$OK
+    Set tRef = $Get(pContents)
+    Set tIsRef = (("%" = $Extract(tRef)) || ("^" = $Extract(tRef)))
+    Set tSC = $$$OK
     Try {
-        Set tree = ##class(JVDoc.Schema).GetTree(pDocType)
-        If '$IsObject(tree) {
-            Set sc = $$$ERROR($$$GeneralError, "Unknown DocType: "_pDocType)
+        Set tTree = ##class(JVDoc.Schema).GetTree(pDocType)
+        If '$IsObject(tTree) {
+            Set tSC = $$$ERROR($$$GeneralError, "Unknown DocType: "_pDocType)
         } Else {
-            Kill tmp
-            Do ..Fill(tree.children, .tmp, pExtraDetails)
-            If isRef {
-                Kill @ref
-                Merge @ref = tmp
+            Kill tTmp
+            Do ..Fill(tTree.children, .tTmp, pExtraDetails)
+            If tIsRef {
+                Kill @tRef
+                Merge @tRef = tTmp
             } Else {
                 Kill pContents
-                Merge pContents = tmp
+                Merge pContents = tTmp
             }
         }
-    } Catch ex {
-        Set sc = ex.AsStatus()
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Builds one level of the content array from a children list, recursing into object children.<br>
@@ -586,26 +659,26 @@ ClassMethod GetContentArray(Output pContents, pMode As %String = "source", pDocT
 /// <var>pExtra</var>: 1 adds opt, desc and vals
 ClassMethod Fill(pChildren As %DynamicArray, ByRef pArr, pExtra) [ Private ]
 {
-    Set n = 0, it = pChildren.%GetIterator()
-    While it.%GetNext(.k, .c) {
-        Set n = n+1
-        Set isArr = (c.type = "array")
-        Set el = $Select(isArr:c.items, 1:c)
-        Set pArr(n, "name") = c.name_$Select(isArr:"()", 1:"")
+    Set tN = 0, tIt = pChildren.%GetIterator()
+    While tIt.%GetNext(.tK, .tC) {
+        Set tN = tN+1
+        Set tIsArr = (tC.type = "array")
+        Set tEl = $Select(tIsArr:tC.items, 1:tC)
+        Set pArr(tN, "name") = tC.name_$Select(tIsArr:"()", 1:"")
         // Consistent with product convention: scalars omit the type; array nodes use "()" as the type
-        If isArr Set pArr(n, "type") = "()"
+        If tIsArr Set pArr(tN, "type") = "()"
         If pExtra {
-            Set pArr(n, "opt") = +c.opt
-            If c.desc '= "" Set pArr(n, "desc") = c.desc
-            If c.vals '= "" Set pArr(n, "vals") = c.vals
+            Set pArr(tN, "opt") = +tC.opt
+            If tC.desc '= "" Set pArr(tN, "desc") = tC.desc
+            If tC.vals '= "" Set pArr(tN, "vals") = tC.vals
         }
-        If (el.type = "object") && $IsObject(el.children) {
-            Kill sub
-            Do ..Fill(el.children, .sub, pExtra)
-            Merge pArr(n) = sub
+        If (tEl.type = "object") && $IsObject(tEl.children) {
+            Kill tSub
+            Do ..Fill(tEl.children, .tSub, pExtra)
+            Merge pArr(tN) = tSub
         }
     }
-    Set pArr = n
+    Set pArr = tN
 }
 
 /// Lists all DocType categories stored in JVDoc.SchemaDef; required by the DTL and rule editors to populate the category list.<br>
@@ -621,17 +694,17 @@ Query EnumerateTypeCategories(pStandard As %String = "") As %Query(ROWSPEC = "Ca
 /// Returns: SQL error when the query fails
 ClassMethod EnumerateTypeCategoriesExecute(ByRef pHandle As %Binary, pStandard As %String = "") As %Status
 {
-    Set rows = "", std = $Get(pStandard)
+    Set tRows = "", tStd = $Get(pStandard)
     // pStandard=0 means standard categories only; all JVDoc categories are user-defined, so nothing is returned
-    If std '= "0" {
-        Set rs = ##class(%SQL.Statement).%ExecDirect(, "SELECT DISTINCT Category FROM JVDoc.SchemaDef ORDER BY Category")
-        If rs.%SQLCODE < 0 Quit $$$ERROR($$$SQLError, rs.%SQLCODE, rs.%Message)
-        While rs.%Next() {
-            Set c = rs.%Get("Category")
-            If ..Match(c, std) Set rows = rows_$ListBuild($ListBuild(c, "JSON schema category", 0, ""))
+    If tStd '= "0" {
+        Set tRs = ##class(%SQL.Statement).%ExecDirect(, "SELECT DISTINCT Category FROM JVDoc.SchemaDef ORDER BY Category")
+        If tRs.%SQLCODE < 0 Quit $$$ERROR($$$SQLError, tRs.%SQLCODE, tRs.%Message)
+        While tRs.%Next() {
+            Set tC = tRs.%Get("Category")
+            If ..Match(tC, tStd) Set tRows = tRows_$ListBuild($ListBuild(tC, "JSON schema category", 0, ""))
         }
     }
-    Set pHandle = $ListBuild(0, rows)
+    Set pHandle = $ListBuild(0, tRows)
     Quit $$$OK
 }
 
@@ -669,16 +742,16 @@ Query EnumerateDocTypes(pCategory As %String = "", pIncludeBase As %Boolean = 0)
 /// Returns: SQL error when the query fails
 ClassMethod EnumerateDocTypesExecute(ByRef pHandle As %Binary, pCategory As %String = "", pIncludeBase As %Boolean = 0) As %Status
 {
-    Set rows = "", cat = $Get(pCategory)
-    If cat '= "0" {
-        Set rs = ##class(%SQL.Statement).%ExecDirect(, "SELECT Category, Name FROM JVDoc.SchemaDef ORDER BY Category, Name")
-        If rs.%SQLCODE < 0 Quit $$$ERROR($$$SQLError, rs.%SQLCODE, rs.%Message)
-        While rs.%Next() {
-            Set c = rs.%Get("Category")
-            If ..Match(c, cat) Set rows = rows_$ListBuild($ListBuild(c_":"_rs.%Get("Name")))
+    Set tRows = "", tCat = $Get(pCategory)
+    If tCat '= "0" {
+        Set tRs = ##class(%SQL.Statement).%ExecDirect(, "SELECT Category, Name FROM JVDoc.SchemaDef ORDER BY Category, Name")
+        If tRs.%SQLCODE < 0 Quit $$$ERROR($$$SQLError, tRs.%SQLCODE, tRs.%Message)
+        While tRs.%Next() {
+            Set tC = tRs.%Get("Category")
+            If ..Match(tC, tCat) Set tRows = tRows_$ListBuild($ListBuild(tC_":"_tRs.%Get("Name")))
         }
     }
-    Set pHandle = $ListBuild(0, rows)
+    Set pHandle = $ListBuild(0, tRows)
     Quit $$$OK
 }
 
@@ -719,12 +792,12 @@ ClassMethod Match(pCategory As %String, pFilter As %String) As %Boolean [ Privat
 /// Returns: $$$OK
 ClassMethod FetchRow(ByRef pHandle As %Binary, ByRef pRow As %List, ByRef pAtEnd As %Integer) As %Status [ Private ]
 {
-    Set pos = $ListGet(pHandle, 1) + 1, rows = $ListGet(pHandle, 2)
-    If pos > $ListLength(rows) {
+    Set tPos = $ListGet(pHandle, 1) + 1, tRows = $ListGet(pHandle, 2)
+    If tPos > $ListLength(tRows) {
         Set pRow = "", pAtEnd = 1, pHandle = ""
         Quit $$$OK
     }
-    Set pRow = $List(rows, pos), pHandle = $ListBuild(pos, rows)
+    Set pRow = $List(tRows, tPos), pHandle = $ListBuild(tPos, tRows)
     Quit $$$OK
 }
 
@@ -755,10 +828,10 @@ Method NameGet() As %String [ ServerOnly = 1 ]
 /// Returns: the value at that path; "" when no path is set or the path is missing
 Method IdentifierGet() As %String [ ServerOnly = 1 ]
 {
-    Set path = ##class(JVDoc.Schema).GetIdentifierPath(i%DocType)
-    If path = "" Set path = ..#IDENTIFIERPATH
-    If path = "" Quit ""
-    Quit ..GetValueAt(path)
+    Set tPath = ##class(JVDoc.Schema).GetIdentifierPath(i%DocType)
+    If tPath = "" Set tPath = ..#IDENTIFIERPATH
+    If tPath = "" Quit ""
+    Quit ..GetValueAt(tPath)
 }
 
 // ---------------- Validation ----------------
@@ -788,24 +861,24 @@ Method IdentifierGet() As %String [ ServerOnly = 1 ]
 /// Returns: $$$OK when valid; otherwise a status combining one error per violation (at most 50), each "path: message", or an error when the JSON does not parse, the DocType is empty or unknown, or the root is not an object</p>
 Method Validate(pValidationSpec As %String = "") As %Status
 {
-    Set obj = ..GetObj(.sc)
-    If $$$ISERR(sc) Quit $$$ERROR($$$GeneralError, "Invalid JSON: "_$System.Status.GetErrorText(sc))
-    Set flags = ..ParseSpec(pValidationSpec)
-    If flags = "" Quit $$$OK
+    Set tObj = ..GetObj(.tSC)
+    If $$$ISERR(tSC) Quit $$$ERROR($$$GeneralError, "Invalid JSON: "_$System.Status.GetErrorText(tSC))
+    Set tFlags = ..ParseSpec(pValidationSpec)
+    If tFlags = "" Quit $$$OK
     If ..DocType = "" Quit $$$ERROR($$$GeneralError, "Cannot validate: DocType is empty")
-    Set tree = ##class(JVDoc.Schema).GetTree(..DocType)
-    If '$IsObject(tree) Quit $$$ERROR($$$GeneralError, "Cannot validate: unknown DocType "_..DocType)
-    If $ClassName(obj) '= "%Library.DynamicObject" Quit $$$ERROR($$$GeneralError, "Root must be a JSON object")
-    Set n = 0
-    Do ..CheckObject(tree, obj, "", flags, .errs, .n)
-    Do ..CheckComposition(tree, obj, "object", "", flags, .errs, .n)
-    If n = 0 Quit $$$OK
-    Set sc = $$$OK
-    For i = 1:1:n {
-        Set st = $$$ERROR($$$GeneralError, errs(i))
-        Set sc = $Select(+sc:st, 1:$System.Status.AppendStatus(sc, st))
+    Set tTree = ##class(JVDoc.Schema).GetTree(..DocType)
+    If '$IsObject(tTree) Quit $$$ERROR($$$GeneralError, "Cannot validate: unknown DocType "_..DocType)
+    If $ClassName(tObj) '= "%Library.DynamicObject" Quit $$$ERROR($$$GeneralError, "Root must be a JSON object")
+    Set tN = 0
+    Do ..CheckObject(tTree, tObj, "", tFlags, .tErrs, .tN)
+    Do ..CheckComposition(tTree, tObj, "object", "", tFlags, .tErrs, .tN)
+    If tN = 0 Quit $$$OK
+    Set tSC = $$$OK
+    For tI = 1:1:tN {
+        Set tSt = $$$ERROR($$$GeneralError, tErrs(tI))
+        Set tSC = $Select(+tSC:tSt, 1:$System.Status.AppendStatus(tSC, tSt))
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Validates JSON without saving anything.<br>
@@ -814,45 +887,45 @@ Method Validate(pValidationSpec As %String = "") As %Status
 ///          For i = 1:1:errs Write errs(i), !<br>
 /// <var>pJSON</var>: a JSON string, stream, or %DynamicObject<br>
 /// <var>pDocType</var>: the DocType "Cat:Name" to validate against<br>
-/// <var>pSpec</var>: validation switches as in Validate; default "all"<br>
+/// <var>pValidationSpec</var>: validation switches as in Validate; default "all"<br>
 /// <var>pErrors</var> (output): number of errors; pErrors(i) is the text of the i-th error<br>
 /// Returns: the status of Validate
-ClassMethod ValidateJSON(pJSON, pDocType As %String, pSpec As %String = "all", Output pErrors) As %Status
+ClassMethod ValidateJSON(pJSON, pDocType As %String, pValidationSpec As %String = "all", Output pErrors) As %Status
 {
     Kill pErrors
     Set pErrors = 0
-    Set d = ##class(JVDoc.Document).%New(pJSON)
-    Set d.DocType = pDocType
-    Set sc = d.Validate(pSpec)
-    If $$$ISERR(sc) {
-        Do $System.Status.DecomposeStatus(sc, .errs)
-        Set pErrors = +$Get(errs)
-        For i = 1:1:pErrors Set pErrors(i) = errs(i)
+    Set tD = ##class(JVDoc.Document).%New(pJSON)
+    Set tD.DocType = pDocType
+    Set tSC = tD.Validate(pValidationSpec)
+    If $$$ISERR(tSC) {
+        Do $System.Status.DecomposeStatus(tSC, .tErrs)
+        Set pErrors = +$Get(tErrs)
+        For tI = 1:1:pErrors Set pErrors(tI) = tErrs(tI)
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Normalizes a validation spec: "all" expands to ALLFLAGS, "-x" removes x, duplicates and letters other than ALLFLAGS and u are dropped (so the product's d and m are ignored).<br>
-/// <var>pSpec</var>: the spec, e.g. "all-p" or "rt"; case-insensitive<br>
+/// <var>pValidationSpec</var>: the spec, e.g. "all-p" or "rt"; case-insensitive<br>
 /// Returns: the active switch letters, e.g. "rtebcaso"; "" when none
-ClassMethod ParseSpec(pSpec As %String) As %String [ Private ]
+ClassMethod ParseSpec(pValidationSpec As %String) As %String [ Private ]
 {
-    Set s = $ZConvert($ZStrip(pSpec, "<>W"), "L"), pos = "", neg = "", valid = ..#ALLFLAGS_"u"
-    If s [ "all" Set s = $Replace(s, "all", ..#ALLFLAGS)
-    Set i = 1
-    While i <= $Length(s) {
-        Set c = $Extract(s, i)
-        If c = "-" {
-            Set i = i + 1, c = $Extract(s, i)
-            If (c '= "") && (valid [ c) Set neg = neg_c
-        } ElseIf (c '= "") && (valid [ c) && (pos '[ c) {
-            Set pos = pos_c
+    Set tS = $ZConvert($ZStrip(pValidationSpec, "<>W"), "L"), tPos = "", tNeg = "", tValid = ..#ALLFLAGS_"u"
+    If tS [ "all" Set tS = $Replace(tS, "all", ..#ALLFLAGS)
+    Set tI = 1
+    While tI <= $Length(tS) {
+        Set tC = $Extract(tS, tI)
+        If tC = "-" {
+            Set tI = tI + 1, tC = $Extract(tS, tI)
+            If (tC '= "") && (tValid [ tC) Set tNeg = tNeg_tC
+        } ElseIf (tC '= "") && (tValid [ tC) && (tPos '[ tC) {
+            Set tPos = tPos_tC
         }
-        Set i = i + 1
+        Set tI = tI + 1
     }
-    Set out = ""
-    For j = 1:1:$Length(pos) { If neg '[ $Extract(pos, j) Set out = out_$Extract(pos, j) }
-    Quit out
+    Set tOut = ""
+    For tJ = 1:1:$Length(tPos) { If tNeg '[ $Extract(tPos, tJ) Set tOut = tOut_$Extract(tPos, tJ) }
+    Quit tOut
 }
 
 /// Appends "path: message" to the error list, skipping texts already present (allOf members and the merged field tree can report the same violation); stops at 50 entries and adds a single "(more errors omitted)" line.<br>
@@ -862,15 +935,15 @@ ClassMethod ParseSpec(pSpec As %String) As %String [ Private ]
 /// <var>pMsg</var>: error text
 ClassMethod AddErr(ByRef pErrs, ByRef pN, pPath As %String, pMsg As %String) [ Private ]
 {
-    Set txt = $Select(pPath = "":"(root)", 1:pPath)_": "_pMsg
-    For i = 1:1:pN { If $Get(pErrs(i)) = txt Quit }
-    If (pN > 0) && ($Get(pErrs(i)) = txt) Quit
+    Set tTxt = $Select(pPath = "":"(root)", 1:pPath)_": "_pMsg
+    For tI = 1:1:pN { If $Get(pErrs(tI)) = tTxt Quit }
+    If (pN > 0) && ($Get(pErrs(tI)) = tTxt) Quit
     If pN >= 50 {
         If pN = 50 Set pN = 51, pErrs(51) = "(more errors omitted)"
         Quit
     }
     Set pN = pN + 1
-    Set pErrs(pN) = txt
+    Set pErrs(pN) = tTxt
 }
 
 /// Validates an object against an object node: each declared child (required when missing, otherwise CheckArray/CheckValue; null values and fields declared only in oneOf/anyOf alternatives are skipped),
@@ -883,105 +956,105 @@ ClassMethod AddErr(ByRef pErrs, ByRef pN, pPath As %String, pMsg As %String) [ P
 /// <var>pN</var> (byref): number of errors
 ClassMethod CheckObject(pNode As %DynamicObject, pData, pPath As %String, pFlags As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
-    Kill known
-    Set it = pNode.children.%GetIterator()
-    While it.%GetNext(.k, .c) {
-        Set name = c.name, known(name) = ""
-        Set path = pPath_$Select(pPath = "":"", 1:".")_name
-        Set t = pData.%GetTypeOf(name)
-        If t = "unassigned" {
-            If (pFlags [ "r") && ('+c.opt) Do ..AddErr(.pErrs, .pN, path, "required field is missing")
+    Kill tKnown
+    Set tIt = pNode.children.%GetIterator()
+    While tIt.%GetNext(.tK, .tC) {
+        Set tName = tC.name, tKnown(tName) = ""
+        Set tPath = pPath_$Select(pPath = "":"", 1:".")_tName
+        Set tT = pData.%GetTypeOf(tName)
+        If tT = "unassigned" {
+            If (pFlags [ "r") && ('+tC.opt) Do ..AddErr(.pErrs, .pN, tPath, "required field is missing")
             Continue
         }
         // Fields declared only inside oneOf/anyOf alternatives are checked by the alternative itself
-        If (t = "null") || c.%Get("fromAlt") Continue
-        Set val = pData.%Get(name)
-        If c.type = "array" {
-            Do ..CheckArray(c, val, t, path, pFlags, .pErrs, .pN)
+        If (tT = "null") || tC.%Get("fromAlt") Continue
+        Set tVal = pData.%Get(tName)
+        If tC.type = "array" {
+            Do ..CheckArray(tC, tVal, tT, tPath, pFlags, .pErrs, .pN)
         } Else {
-            Do ..CheckValue(c, val, t, path, pFlags, .pErrs, .pN)
+            Do ..CheckValue(tC, tVal, tT, tPath, pFlags, .pErrs, .pN)
         }
     }
     // minProperties / maxProperties: count all properties on the object
     If pFlags [ "b" {
-        Set cnt = 0, itc = pData.%GetIterator()
-        While itc.%GetNext() { Set cnt = cnt + 1 }
-        If (pNode.%GetTypeOf("minProperties") = "number") && (cnt < pNode.%Get("minProperties")) Do ..AddErr(.pErrs, .pN, pPath, "property count "_cnt_" is less than minProperties "_pNode.%Get("minProperties"))
-        If (pNode.%GetTypeOf("maxProperties") = "number") && (cnt > pNode.%Get("maxProperties")) Do ..AddErr(.pErrs, .pN, pPath, "property count "_cnt_" is more than maxProperties "_pNode.%Get("maxProperties"))
+        Set tCnt = 0, tItc = pData.%GetIterator()
+        While tItc.%GetNext() { Set tCnt = tCnt + 1 }
+        If (pNode.%GetTypeOf("minProperties") = "number") && (tCnt < pNode.%Get("minProperties")) Do ..AddErr(.pErrs, .pN, pPath, "property count "_tCnt_" is less than minProperties "_pNode.%Get("minProperties"))
+        If (pNode.%GetTypeOf("maxProperties") = "number") && (tCnt > pNode.%Get("maxProperties")) Do ..AddErr(.pErrs, .pN, pPath, "property count "_tCnt_" is more than maxProperties "_pNode.%Get("maxProperties"))
     }
     // dependentRequired: when the key is present (even null), the dependent fields must also be present
     If (pFlags [ "r") && $IsObject(pNode.%Get("dep")) {
-        Set itd = pNode.dep.%GetIterator()
-        While itd.%GetNext(.dk, .dnames) {
-            If pData.%GetTypeOf(dk) = "unassigned" Continue
-            Set itn = dnames.%GetIterator()
-            While itn.%GetNext(.j, .dn) {
-                If pData.%GetTypeOf(dn) = "unassigned" Do ..AddErr(.pErrs, .pN, pPath_$Select(pPath = "":"", 1:".")_dn, "required when '"_dk_"' is present")
+        Set tItd = pNode.dep.%GetIterator()
+        While tItd.%GetNext(.tDk, .tDnames) {
+            If pData.%GetTypeOf(tDk) = "unassigned" Continue
+            Set tItn = tDnames.%GetIterator()
+            While tItn.%GetNext(.tJ, .tDn) {
+                If pData.%GetTypeOf(tDn) = "unassigned" Do ..AddErr(.pErrs, .pN, pPath_$Select(pPath = "":"", 1:".")_tDn, "required when '"_tDk_"' is present")
             }
         }
     }
     // dependentSchemas: when the key is present (even null), the object must also satisfy the corresponding sub-schema (unknown fields not checked)
     If $IsObject(pNode.%Get("dsch")) {
-        Set dflags = $Translate(pFlags, "u")
-        Set itx = pNode.dsch.%GetIterator()
-        While itx.%GetNext(.xk, .xe) {
-            If pData.%GetTypeOf(xe.key) = "unassigned" Continue
-            Do ..CheckObject(xe.node, pData, pPath, dflags, .pErrs, .pN)
+        Set tDflags = $Translate(pFlags, "u")
+        Set tItx = pNode.dsch.%GetIterator()
+        While tItx.%GetNext(.tXk, .tXe) {
+            If pData.%GetTypeOf(tXe.key) = "unassigned" Continue
+            Do ..CheckObject(tXe.node, pData, pPath, tDflags, .pErrs, .pN)
         }
     }
     // propertyNames: every property name (including those outside the schema) is validated as a string against the sub-schema
     If (pFlags [ "s") && $IsObject(pNode.%Get("pnames")) {
-        Set itp = pData.%GetIterator()
-        While itp.%GetNext(.pk) {
-            Kill e3
-            Set n3 = 0
-            Do ..CheckValue(pNode.pnames, pk, "string", "", pFlags, .e3, .n3)
-            For i = 1:1:n3 {
-                Do ..AddErr(.pErrs, .pN, pPath_$Select(pPath = "":"", 1:".")_pk, "property name is invalid: "_$Piece(e3(i), ": ", 2, *))
+        Set tItp = pData.%GetIterator()
+        While tItp.%GetNext(.tPk) {
+            Kill tE3
+            Set tN3 = 0
+            Do ..CheckValue(pNode.pnames, tPk, "string", "", pFlags, .tE3, .tN3)
+            For tI = 1:1:tN3 {
+                Do ..AddErr(.pErrs, .pN, pPath_$Select(pPath = "":"", 1:".")_tPk, "property name is invalid: "_$Piece(tE3(tI), ": ", 2, *))
             }
         }
     }
     If pFlags [ "u" {
-        Set it2 = pData.%GetIterator()
-        While it2.%GetNext(.k2, .v2) {
-            If '$Data(known(k2)) Do ..AddErr(.pErrs, .pN, pPath_$Select(pPath = "":"", 1:".")_k2, "unknown field")
+        Set tIt2 = pData.%GetIterator()
+        While tIt2.%GetNext(.tK2, .tV2) {
+            If '$Data(tKnown(tK2)) Do ..AddErr(.pErrs, .pN, pPath_$Select(pPath = "":"", 1:".")_tK2, "unknown field")
         }
     }
     // additionalProperties: false rejects unknown fields (when u is also on, only u reports them); a schema validates each additional field's value against it
-    Set at = pNode.%GetTypeOf("additional"), doAdd = 0
+    Set tAt = pNode.%GetTypeOf("additional"), tDoAdd = 0
     If pFlags [ "a" {
-        If at = "object" {
-            Set doAdd = 1
-        } ElseIf (at = "boolean") && ('pNode.%Get("additional")) && (pFlags '[ "u") {
-            Set doAdd = 1
+        If tAt = "object" {
+            Set tDoAdd = 1
+        } ElseIf (tAt = "boolean") && ('pNode.%Get("additional")) && (pFlags '[ "u") {
+            Set tDoAdd = 1
         }
     }
-    If doAdd {
-        Set it3 = pData.%GetIterator()
-        While it3.%GetNext(.k3, .v3, .t3) {
-            If $Data(known(k3)) Continue
-            Set apath = pPath_$Select(pPath = "":"", 1:".")_k3
-            If at = "boolean" {
-                Do ..AddErr(.pErrs, .pN, apath, "additional property is not allowed")
+    If tDoAdd {
+        Set tIt3 = pData.%GetIterator()
+        While tIt3.%GetNext(.tK3, .tV3, .t3) {
+            If $Data(tKnown(tK3)) Continue
+            Set tApath = pPath_$Select(pPath = "":"", 1:".")_tK3
+            If tAt = "boolean" {
+                Do ..AddErr(.pErrs, .pN, tApath, "additional property is not allowed")
             } ElseIf t3 '= "null" {
                 If pNode.additional.type = "array" {
-                    Do ..CheckArray(pNode.additional, v3, t3, apath, pFlags, .pErrs, .pN)
+                    Do ..CheckArray(pNode.additional, tV3, t3, tApath, pFlags, .pErrs, .pN)
                 } Else {
-                    Do ..CheckValue(pNode.additional, v3, t3, apath, pFlags, .pErrs, .pN)
+                    Do ..CheckValue(pNode.additional, tV3, t3, tApath, pFlags, .pErrs, .pN)
                 }
             }
         }
     }
     // if/then/else: if is evaluated with full checks to decide which branch to take; then or else is checked with the user-supplied flags (unknown fields are not checked inside branches)
     If $IsObject(pNode.%Get("cond")) {
-        Set bflags = $Translate(pFlags, "u")
-        Set ci = pNode.cond.%GetIterator()
-        While ci.%GetNext(.ck, .ce) {
-            Kill e2
-            Set n2 = 0
-            Do ..CheckObject(ce.%Get("if"), pData, pPath, ..#ALLFLAGS, .e2, .n2)
-            Set bn = ce.%Get($Select(n2 = 0:"then", 1:"else"))
-            If $IsObject(bn) Do ..CheckObject(bn, pData, pPath, bflags, .pErrs, .pN)
+        Set tBflags = $Translate(pFlags, "u")
+        Set tCi = pNode.cond.%GetIterator()
+        While tCi.%GetNext(.tCk, .tCe) {
+            Kill tE2
+            Set tN2 = 0
+            Do ..CheckObject(tCe.%Get("if"), pData, pPath, ..#ALLFLAGS, .tE2, .tN2)
+            Set tBn = tCe.%Get($Select(tN2 = 0:"then", 1:"else"))
+            If $IsObject(tBn) Do ..CheckObject(tBn, pData, pPath, tBflags, .pErrs, .pN)
         }
     }
 }
@@ -1001,21 +1074,21 @@ ClassMethod CheckArray(pArr As %DynamicObject, pVal, pType As %String, pPath As 
         If pFlags [ "t" Do ..AddErr(.pErrs, .pN, pPath, "expected array, got "_pType)
         Quit
     }
-    Set n = pVal.%Size()
+    Set tN = pVal.%Size()
     If pFlags [ "b" {
-        If (pArr.%GetTypeOf("minItems") = "number") && (n < pArr.%Get("minItems")) Do ..AddErr(.pErrs, .pN, pPath, "array has "_n_" item(s), fewer than minItems "_pArr.%Get("minItems"))
-        If (pArr.%GetTypeOf("maxItems") = "number") && (n > pArr.%Get("maxItems")) Do ..AddErr(.pErrs, .pN, pPath, "array has "_n_" item(s), more than maxItems "_pArr.%Get("maxItems"))
-        If (pArr.%GetTypeOf("uniqueItems") = "boolean") && pArr.%Get("uniqueItems") Do ..CheckUnique(pVal, n, pPath, .pErrs, .pN)
+        If (pArr.%GetTypeOf("minItems") = "number") && (tN < pArr.%Get("minItems")) Do ..AddErr(.pErrs, .pN, pPath, "array has "_tN_" item(s), fewer than minItems "_pArr.%Get("minItems"))
+        If (pArr.%GetTypeOf("maxItems") = "number") && (tN > pArr.%Get("maxItems")) Do ..AddErr(.pErrs, .pN, pPath, "array has "_tN_" item(s), more than maxItems "_pArr.%Get("maxItems"))
+        If (pArr.%GetTypeOf("uniqueItems") = "boolean") && pArr.%Get("uniqueItems") Do ..CheckUnique(pVal, tN, pPath, .pErrs, .pN)
     }
     If pFlags [ "c" Do ..CheckConst(pArr, pVal, pType, pPath, .pErrs, .pN)
     Do ..CheckComposition(pArr, pVal, pType, pPath, pFlags, .pErrs, .pN)
     If (pFlags [ "e") && $IsObject(pArr.%Get("enum")) Do ..CheckEnum(pArr, pVal, pType, pPath, .pErrs, .pN)
-    If pFlags [ "s" Do ..CheckContains(pArr, pVal, n, pPath, .pErrs, .pN)
-    Set items = pArr.items
-    For i = 0:1:n-1 {
-        Set et = pVal.%GetTypeOf(i)
-        If et = "null" Continue
-        Do ..CheckValue(items, pVal.%Get(i), et, pPath_"("_(i+1)_")", pFlags, .pErrs, .pN)
+    If pFlags [ "s" Do ..CheckContains(pArr, pVal, tN, pPath, .pErrs, .pN)
+    Set tItems = pArr.items
+    For tI = 0:1:tN-1 {
+        Set tEt = pVal.%GetTypeOf(tI)
+        If tEt = "null" Continue
+        Do ..CheckValue(tItems, pVal.%Get(tI), tEt, pPath_"("_(tI+1)_")", pFlags, .pErrs, .pN)
     }
 }
 
@@ -1030,27 +1103,27 @@ ClassMethod CheckArray(pArr As %DynamicObject, pVal, pType As %String, pPath As 
 /// <var>pN</var> (byref): number of errors
 ClassMethod CheckValue(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, pFlags As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
-    Set st = pNode.type
+    Set tSt = pNode.type
     // Array nodes (the items of a nested array) get the full array treatment, including their own elements
-    If st = "array" Do ..CheckArray(pNode, pVal, pType, pPath, pFlags, .pErrs, .pN) Quit
+    If tSt = "array" Do ..CheckArray(pNode, pVal, pType, pPath, pFlags, .pErrs, .pN) Quit
     If pFlags [ "t" {
-        Set ok = $Case(st, "string":(pType = "string"), "number":(pType = "number"), "integer":((pType = "number") && (pVal = (pVal\1))), "boolean":(pType = "boolean"), "object":(pType = "object"), :1)
-        If 'ok {
-            Do ..AddErr(.pErrs, .pN, pPath, "expected "_st_", got "_pType)
+        Set tOk = $Case(tSt, "string":(pType = "string"), "number":(pType = "number"), "integer":((pType = "number") && (pVal = (pVal\1))), "boolean":(pType = "boolean"), "object":(pType = "object"), :1)
+        If 'tOk {
+            Do ..AddErr(.pErrs, .pN, pPath, "expected "_tSt_", got "_pType)
             Quit
         }
     }
     If pFlags [ "c" Do ..CheckConst(pNode, pVal, pType, pPath, .pErrs, .pN)
     Do ..CheckComposition(pNode, pVal, pType, pPath, pFlags, .pErrs, .pN)
     If (pFlags [ "e") && $IsObject(pNode.%Get("enum")) Do ..CheckEnum(pNode, pVal, pType, pPath, .pErrs, .pN)
-    If st = "object" {
+    If tSt = "object" {
         If (pType = "object") && $IsObject(pNode.%Get("children")) Do ..CheckObject(pNode, pVal, pPath, pFlags, .pErrs, .pN)
         Quit
     }
-    If (pFlags [ "p") && ((st = "string") || (st = "any")) && (pType = "string") && (pNode.%Get("pattern") '= "") {
+    If (pFlags [ "p") && ((tSt = "string") || (tSt = "any")) && (pType = "string") && (pNode.%Get("pattern") '= "") {
         Try {
             If '$Locate(pVal, pNode.pattern) Do ..AddErr(.pErrs, .pN, pPath, "value does not match pattern "_pNode.pattern)
-        } Catch ex {
+        } Catch tEx {
             Do ..AddErr(.pErrs, .pN, pPath, "invalid pattern in schema: "_pNode.pattern)
         }
     }
@@ -1065,7 +1138,7 @@ ClassMethod CheckValue(pNode As %DynamicObject, pVal, pType As %String, pPath As
 /// Returns: 1 when there is no error
 ClassMethod Matches(pNode As %DynamicObject, pVal, pType As %String, pPath As %String) As %Boolean [ Private ]
 {
-    Quit ..MatchErr(pNode, pVal, pType, pPath, .first)
+    Quit ..MatchErr(pNode, pVal, pType, pPath, .tFirst)
 }
 
 /// Tests a value against a sub-schema with all checks except u, and reports why it does not match.<br>
@@ -1077,19 +1150,19 @@ ClassMethod Matches(pNode As %DynamicObject, pVal, pType As %String, pPath As %S
 /// Returns: 1 when there is no error
 ClassMethod MatchErr(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, Output pFirst As %String) As %Boolean [ Private ]
 {
-    Kill e
-    Set n = 0, pFirst = ""
+    Kill tE
+    Set tN = 0, pFirst = ""
     If pNode.type = "array" {
-        Do ..CheckArray(pNode, pVal, pType, pPath, ..#ALLFLAGS, .e, .n)
+        Do ..CheckArray(pNode, pVal, pType, pPath, ..#ALLFLAGS, .tE, .tN)
     } Else {
-        Do ..CheckValue(pNode, pVal, pType, pPath, ..#ALLFLAGS, .e, .n)
+        Do ..CheckValue(pNode, pVal, pType, pPath, ..#ALLFLAGS, .tE, .tN)
     }
-    If n > 0 {
-        Set full = e(1), pre = $Select(pPath = "":"(root)", 1:pPath)_": "
-        If $Extract(full, 1, $Length(pre)) = pre Set full = $Extract(full, $Length(pre)+1, *)
-        Set pFirst = full
+    If tN > 0 {
+        Set tFull = tE(1), tPre = $Select(pPath = "":"(root)", 1:pPath)_": "
+        If $Extract(tFull, 1, $Length(tPre)) = tPre Set tFull = $Extract(tFull, $Length(tPre)+1, *)
+        Set pFirst = tFull
     }
-    Quit (n = 0)
+    Quit (tN = 0)
 }
 
 /// Dispatches the composition checks: not (with s), oneOf/anyOf (with o), and allOf (always).<br>
@@ -1117,22 +1190,22 @@ ClassMethod CheckComposition(pNode As %DynamicObject, pVal, pType As %String, pP
 ClassMethod CheckAlts(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
     If '$IsObject(pNode.%Get("alts")) Quit
-    Set itg = pNode.alts.%GetIterator()
-    While itg.%GetNext(.gk, .ge) {
-        Set cnt = 0, why = "", i = 0
-        Set ita = ge.list.%GetIterator()
-        While ita.%GetNext(.ak, .alt) {
-            Set i = i + 1
-            If ..MatchErr(alt, pVal, pType, pPath, .first) {
-                Set cnt = cnt + 1
-            } ElseIf i <= 5 {
-                Set why = why_$Select(why = "":"", 1:"; ")_i_": "_$Extract(first, 1, 80)
+    Set tItg = pNode.alts.%GetIterator()
+    While tItg.%GetNext(.tGk, .tGe) {
+        Set tCnt = 0, tWhy = "", tI = 0
+        Set tIta = tGe.list.%GetIterator()
+        While tIta.%GetNext(.tAk, .tAlt) {
+            Set tI = tI + 1
+            If ..MatchErr(tAlt, pVal, pType, pPath, .tFirst) {
+                Set tCnt = tCnt + 1
+            } ElseIf tI <= 5 {
+                Set tWhy = tWhy_$Select(tWhy = "":"", 1:"; ")_tI_": "_$Extract(tFirst, 1, 80)
             }
         }
-        If cnt = 0 {
-            Do ..AddErr(.pErrs, .pN, pPath, "value does not match any alternative of "_ge.kw_" ["_why_"]")
-        } ElseIf (ge.kw = "oneOf") && (cnt > 1) {
-            Do ..AddErr(.pErrs, .pN, pPath, "value matches "_cnt_" alternatives of oneOf, exactly one is allowed")
+        If tCnt = 0 {
+            Do ..AddErr(.pErrs, .pN, pPath, "value does not match any alternative of "_tGe.kw_" ["_tWhy_"]")
+        } ElseIf (tGe.kw = "oneOf") && (tCnt > 1) {
+            Do ..AddErr(.pErrs, .pN, pPath, "value matches "_tCnt_" alternatives of oneOf, exactly one is allowed")
         }
     }
 }
@@ -1148,13 +1221,13 @@ ClassMethod CheckAlts(pNode As %DynamicObject, pVal, pType As %String, pPath As 
 ClassMethod CheckAlls(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, pFlags As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
     If '$IsObject(pNode.%Get("alls")) Quit
-    Set mflags = $Translate(pFlags, "u")
-    Set itm = pNode.alls.%GetIterator()
-    While itm.%GetNext(.mk, .mem) {
-        If mem.type = "array" {
-            Do ..CheckArray(mem, pVal, pType, pPath, mflags, .pErrs, .pN)
+    Set tMflags = $Translate(pFlags, "u")
+    Set tItm = pNode.alls.%GetIterator()
+    While tItm.%GetNext(.tMk, .tMem) {
+        If tMem.type = "array" {
+            Do ..CheckArray(tMem, pVal, pType, pPath, tMflags, .pErrs, .pN)
         } Else {
-            Do ..CheckValue(mem, pVal, pType, pPath, mflags, .pErrs, .pN)
+            Do ..CheckValue(tMem, pVal, pType, pPath, tMflags, .pErrs, .pN)
         }
     }
 }
@@ -1169,9 +1242,9 @@ ClassMethod CheckAlls(pNode As %DynamicObject, pVal, pType As %String, pPath As 
 ClassMethod CheckNots(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
     If '$IsObject(pNode.%Get("nots")) Quit
-    Set it = pNode.nots.%GetIterator()
-    While it.%GetNext(.k, .sub) {
-        If ..Matches(sub, pVal, pType, pPath) Do ..AddErr(.pErrs, .pN, pPath, "value must not match the schema in not")
+    Set tIt = pNode.nots.%GetIterator()
+    While tIt.%GetNext(.tK, .tSub) {
+        If ..Matches(tSub, pVal, pType, pPath) Do ..AddErr(.pErrs, .pN, pPath, "value must not match the schema in not")
     }
 }
 
@@ -1184,21 +1257,21 @@ ClassMethod CheckNots(pNode As %DynamicObject, pVal, pType As %String, pPath As 
 /// <var>pN</var> (byref): number of errors
 ClassMethod CheckContains(pArr As %DynamicObject, pVal, pLen As %Integer, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
-    Set cn = pArr.%Get("contains")
-    If '$IsObject(cn) Quit
-    Set hasMin = (pArr.%GetTypeOf("minContains") = "number")
-    Set minC = $Select(hasMin:pArr.%Get("minContains"), 1:1)
-    Set hasMax = (pArr.%GetTypeOf("maxContains") = "number")
-    Set maxC = $Select(hasMax:pArr.%Get("maxContains"), 1:0)
-    Set cnt = 0
-    For i = 0:1:pLen-1 {
-        Set et = pVal.%GetTypeOf(i)
-        If et = "null" Continue
-        If ..Matches(cn, pVal.%Get(i), et, pPath_"("_(i+1)_")") Set cnt = cnt + 1
-        If 'hasMax && (cnt >= minC) Quit
+    Set tCn = pArr.%Get("contains")
+    If '$IsObject(tCn) Quit
+    Set tHasMin = (pArr.%GetTypeOf("minContains") = "number")
+    Set tMinC = $Select(tHasMin:pArr.%Get("minContains"), 1:1)
+    Set tHasMax = (pArr.%GetTypeOf("maxContains") = "number")
+    Set tMaxC = $Select(tHasMax:pArr.%Get("maxContains"), 1:0)
+    Set tCnt = 0
+    For tI = 0:1:pLen-1 {
+        Set tEt = pVal.%GetTypeOf(tI)
+        If tEt = "null" Continue
+        If ..Matches(tCn, pVal.%Get(tI), tEt, pPath_"("_(tI+1)_")") Set tCnt = tCnt + 1
+        If 'tHasMax && (tCnt >= tMinC) Quit
     }
-    If cnt < minC Do ..AddErr(.pErrs, .pN, pPath, $Select(hasMin:cnt_" item(s) match contains, fewer than minContains "_minC, 1:"no item matches contains"))
-    If hasMax && (cnt > maxC) Do ..AddErr(.pErrs, .pN, pPath, cnt_" item(s) match contains, more than maxContains "_maxC)
+    If tCnt < tMinC Do ..AddErr(.pErrs, .pN, pPath, $Select(tHasMin:tCnt_" item(s) match contains, fewer than minContains "_tMinC, 1:"no item matches contains"))
+    If tHasMax && (tCnt > tMaxC) Do ..AddErr(.pErrs, .pN, pPath, tCnt_" item(s) match contains, more than maxContains "_tMaxC)
 }
 
 /// enum: the value must equal one of the listed values; comparison is JSON-type-aware, so number 1, string "1" and boolean true are all distinct.<br>
@@ -1210,11 +1283,11 @@ ClassMethod CheckContains(pArr As %DynamicObject, pVal, pLen As %Integer, pPath 
 /// <var>pN</var> (byref): number of errors
 ClassMethod CheckEnum(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
-    Set found = 0, it = pNode.enum.%GetIterator()
-    While it.%GetNext(.k, .ev, .et) {
-        If ..JSONEquals(pVal, pType, ev, et) { Set found = 1  Quit }
+    Set tFound = 0, tIt = pNode.enum.%GetIterator()
+    While tIt.%GetNext(.tK, .tEv, .tEt) {
+        If ..JSONEquals(pVal, pType, tEv, tEt) { Set tFound = 1  Quit }
     }
-    If 'found Do ..AddErr(.pErrs, .pN, pPath, "value "_..ValText(pVal, pType)_" is not in the allowed list")
+    If 'tFound Do ..AddErr(.pErrs, .pN, pPath, "value "_..ValText(pVal, pType)_" is not in the allowed list")
 }
 
 /// const: the value must equal the const value of the node by JSON equality; nodes without const are not checked.<br>
@@ -1226,9 +1299,9 @@ ClassMethod CheckEnum(pNode As %DynamicObject, pVal, pType As %String, pPath As 
 /// <var>pN</var> (byref): number of errors
 ClassMethod CheckConst(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
-    Set ct = pNode.%GetTypeOf("const")
-    If ct = "unassigned" Quit
-    If '..JSONEquals(pVal, pType, pNode.%Get("const"), ct) Do ..AddErr(.pErrs, .pN, pPath, "value does not equal const "_##class(JVDoc.SchemaImport).ConstText(pNode))
+    Set tCt = pNode.%GetTypeOf("const")
+    If tCt = "unassigned" Quit
+    If '..JSONEquals(pVal, pType, pNode.%Get("const"), tCt) Do ..AddErr(.pErrs, .pN, pPath, "value does not equal const "_##class(JVDoc.SchemaImport).ConstText(pNode))
 }
 
 /// Checks numeric bounds (minimum/maximum, exclusiveMinimum/exclusiveMaximum in boolean or numeric form, multipleOf) and string length (minLength/maxLength, in characters).<br>
@@ -1241,36 +1314,36 @@ ClassMethod CheckConst(pNode As %DynamicObject, pVal, pType As %String, pPath As
 ClassMethod CheckBounds(pNode As %DynamicObject, pVal, pType As %String, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
     If pType = "number" {
-        Set mn = pNode.%GetTypeOf("minimum"), emn = pNode.%GetTypeOf("exclusiveMinimum")
-        If mn = "number" {
-            If (emn = "boolean") && pNode.%Get("exclusiveMinimum") {
+        Set tMn = pNode.%GetTypeOf("minimum"), tEmn = pNode.%GetTypeOf("exclusiveMinimum")
+        If tMn = "number" {
+            If (tEmn = "boolean") && pNode.%Get("exclusiveMinimum") {
                 If pVal <= pNode.%Get("minimum") Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" must be greater than minimum "_pNode.%Get("minimum")_" (exclusive)")
             } ElseIf pVal < pNode.%Get("minimum") {
                 Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" is less than minimum "_pNode.%Get("minimum"))
             }
         }
-        If (emn = "number") && (pVal <= pNode.%Get("exclusiveMinimum")) Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" must be greater than exclusiveMinimum "_pNode.%Get("exclusiveMinimum"))
-        Set mx = pNode.%GetTypeOf("maximum"), emx = pNode.%GetTypeOf("exclusiveMaximum")
-        If mx = "number" {
-            If (emx = "boolean") && pNode.%Get("exclusiveMaximum") {
+        If (tEmn = "number") && (pVal <= pNode.%Get("exclusiveMinimum")) Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" must be greater than exclusiveMinimum "_pNode.%Get("exclusiveMinimum"))
+        Set tMx = pNode.%GetTypeOf("maximum"), tEmx = pNode.%GetTypeOf("exclusiveMaximum")
+        If tMx = "number" {
+            If (tEmx = "boolean") && pNode.%Get("exclusiveMaximum") {
                 If pVal >= pNode.%Get("maximum") Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" must be less than maximum "_pNode.%Get("maximum")_" (exclusive)")
             } ElseIf pVal > pNode.%Get("maximum") {
                 Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" is greater than maximum "_pNode.%Get("maximum"))
             }
         }
-        If (emx = "number") && (pVal >= pNode.%Get("exclusiveMaximum")) Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" must be less than exclusiveMaximum "_pNode.%Get("exclusiveMaximum"))
+        If (tEmx = "number") && (pVal >= pNode.%Get("exclusiveMaximum")) Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" must be less than exclusiveMaximum "_pNode.%Get("exclusiveMaximum"))
         // multipleOf: the quotient is treated as a multiple when it is within 1E-9 of an integer, tolerating floating-point rounding
-        Set mo = pNode.%Get("multipleOf")
-        If (pNode.%GetTypeOf("multipleOf") = "number") && (mo > 0) {
-            Set q = pVal / mo
-            If q < 0 Set q = -q
-            Set r = q - (q\1)
-            If (r > 1E-9) && (r < (1 - 1E-9)) Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" is not a multiple of "_mo)
+        Set tMo = pNode.%Get("multipleOf")
+        If (pNode.%GetTypeOf("multipleOf") = "number") && (tMo > 0) {
+            Set tQ = pVal / tMo
+            If tQ < 0 Set tQ = -tQ
+            Set tR = tQ - (tQ\1)
+            If (tR > 1E-9) && (tR < (1 - 1E-9)) Do ..AddErr(.pErrs, .pN, pPath, "value "_pVal_" is not a multiple of "_tMo)
         }
     } ElseIf pType = "string" {
-        Set len = $Length(pVal)
-        If (pNode.%GetTypeOf("minLength") = "number") && (len < pNode.%Get("minLength")) Do ..AddErr(.pErrs, .pN, pPath, "length "_len_" is shorter than minLength "_pNode.%Get("minLength"))
-        If (pNode.%GetTypeOf("maxLength") = "number") && (len > pNode.%Get("maxLength")) Do ..AddErr(.pErrs, .pN, pPath, "length "_len_" is longer than maxLength "_pNode.%Get("maxLength"))
+        Set tLen = $Length(pVal)
+        If (pNode.%GetTypeOf("minLength") = "number") && (tLen < pNode.%Get("minLength")) Do ..AddErr(.pErrs, .pN, pPath, "length "_tLen_" is shorter than minLength "_pNode.%Get("minLength"))
+        If (pNode.%GetTypeOf("maxLength") = "number") && (tLen > pNode.%Get("maxLength")) Do ..AddErr(.pErrs, .pN, pPath, "length "_tLen_" is longer than maxLength "_pNode.%Get("maxLength"))
     }
 }
 
@@ -1282,31 +1355,31 @@ ClassMethod CheckBounds(pNode As %DynamicObject, pVal, pType As %String, pPath A
 /// <var>pN</var> (byref): number of errors
 ClassMethod CheckUnique(pVal, pLen As %Integer, pPath As %String, ByRef pErrs, ByRef pN) [ Private ]
 {
-    Kill seen
-    Set cx = 0
-    For i = 0:1:pLen-1 {
-        Set t = pVal.%GetTypeOf(i), v = pVal.%Get(i)
-        If (t = "object") || (t = "array") {
-            Set cx = cx + 1
-            If cx > 1000 Continue
-            Set key = t_"|"
-        } ElseIf t = "null" {
-            Set key = "null|"
-        } ElseIf t = "number" {
-            Set key = "number|"_(+v)
+    Kill tSeen
+    Set tCx = 0
+    For tI = 0:1:pLen-1 {
+        Set tT = pVal.%GetTypeOf(tI), tV = pVal.%Get(tI)
+        If (tT = "object") || (tT = "array") {
+            Set tCx = tCx + 1
+            If tCx > 1000 Continue
+            Set tKey = tT_"|"
+        } ElseIf tT = "null" {
+            Set tKey = "null|"
+        } ElseIf tT = "number" {
+            Set tKey = "number|"_(+tV)
         } Else {
-            Set key = t_"|"_$Extract(v, 1, 200)
+            Set tKey = tT_"|"_$Extract(tV, 1, 200)
         }
-        Set dup = "", j = ""
+        Set tDup = "", tJ = ""
         For {
-            Set j = $Order(seen(key, j))
-            If j = "" Quit
-            If ..JSONEquals(v, t, pVal.%Get(j), pVal.%GetTypeOf(j)) { Set dup = j  Quit }
+            Set tJ = $Order(tSeen(tKey, tJ))
+            If tJ = "" Quit
+            If ..JSONEquals(tV, tT, pVal.%Get(tJ), pVal.%GetTypeOf(tJ)) { Set tDup = tJ  Quit }
         }
-        If dup '= "" {
-            Do ..AddErr(.pErrs, .pN, pPath_"("_(i+1)_")", "duplicates item "_(dup+1)_" (uniqueItems)")
+        If tDup '= "" {
+            Do ..AddErr(.pErrs, .pN, pPath_"("_(tI+1)_")", "duplicates item "_(tDup+1)_" (uniqueItems)")
         } Else {
-            Set seen(key, i) = ""
+            Set tSeen(tKey, tI) = ""
         }
     }
 }
@@ -1324,26 +1397,26 @@ ClassMethod JSONEquals(pA, pTA As %String, pB, pTB As %String) As %Boolean [ Pri
     If pTA = "number" Quit (+pA = +pB)
     If (pTA = "string") || (pTA = "boolean") Quit (pA = pB)
     If pTA = "array" {
-        Set n = pA.%Size()
-        If n '= pB.%Size() Quit 0
-        Set ok = 1
-        For i = 0:1:n-1 {
-            If '..JSONEquals(pA.%Get(i), pA.%GetTypeOf(i), pB.%Get(i), pB.%GetTypeOf(i)) { Set ok = 0  Quit }
+        Set tN = pA.%Size()
+        If tN '= pB.%Size() Quit 0
+        Set tOk = 1
+        For tI = 0:1:tN-1 {
+            If '..JSONEquals(pA.%Get(tI), pA.%GetTypeOf(tI), pB.%Get(tI), pB.%GetTypeOf(tI)) { Set tOk = 0  Quit }
         }
-        Quit ok
+        Quit tOk
     }
     If pTA = "object" {
-        Set ok = 1, na = 0, nb = 0
-        Set it = pA.%GetIterator()
-        While it.%GetNext(.k, .v, .t) {
-            Set na = na + 1
-            Set tb = pB.%GetTypeOf(k)
-            If (tb = "unassigned") || '..JSONEquals(v, t, pB.%Get(k), tb) { Set ok = 0  Quit }
+        Set tOk = 1, tNa = 0, tNb = 0
+        Set tIt = pA.%GetIterator()
+        While tIt.%GetNext(.tK, .tV, .tT) {
+            Set tNa = tNa + 1
+            Set tTb = pB.%GetTypeOf(tK)
+            If (tTb = "unassigned") || '..JSONEquals(tV, tT, pB.%Get(tK), tTb) { Set tOk = 0  Quit }
         }
-        If 'ok Quit 0
-        Set it = pB.%GetIterator()
-        While it.%GetNext(.k2) { Set nb = nb + 1 }
-        Quit (na = nb)
+        If 'tOk Quit 0
+        Set tIt = pB.%GetIterator()
+        While tIt.%GetNext(.tK2) { Set tNb = tNb + 1 }
+        Quit (tNa = tNb)
     }
     Quit 0
 }
@@ -1366,9 +1439,9 @@ ClassMethod ValText(pVal, pType As %String) As %String [ Private ]
 /// Returns: the class name, or "" when the document is not indexed
 Method SearchTableClass() As %String
 {
-    Set st = ##class(JVDoc.Schema).GetSearchTable(..DocType)
-    If st = "" Set st = ..#SEARCHTABLE
-    Quit st
+    Set tSt = ##class(JVDoc.Schema).GetSearchTable(..DocType)
+    If tSt = "" Set tSt = ..#SEARCHTABLE
+    Quit tSt
 }
 
 /// Rebuilds the search table rows of this document by calling IndexDoc on its search table class; does nothing for an unsaved document or one without a search table.<br>
@@ -1376,15 +1449,15 @@ Method SearchTableClass() As %String
 /// Returns: error from the cleanup or from IndexDoc
 Method IndexNow(pClearFirst As %Boolean = 1) As %Status
 {
-    Set st = ..SearchTableClass()
-    If st = "" Quit $$$OK
-    Set id = ..%Id()
-    If id = "" Quit $$$OK
+    Set tSt = ..SearchTableClass()
+    If tSt = "" Quit $$$OK
+    Set tId = ..%Id()
+    If tId = "" Quit $$$OK
     If pClearFirst {
-        Set sc = ..ClearIndexRows(st)
-        If $$$ISERR(sc) Quit sc
+        Set tSC = ..ClearIndexRows(tSt)
+        If $$$ISERR(tSC) Quit tSC
     }
-    Quit $classmethod(st, "IndexDoc", $this)
+    Quit $classmethod(tSt, "IndexDoc", $this)
 }
 
 /// Deletes this document's rows from a search table.<br>
@@ -1392,8 +1465,8 @@ Method IndexNow(pClearFirst As %Boolean = 1) As %Status
 /// Returns: error with the SQLCODE when the DELETE fails
 Method ClearIndexRows(pSearchTable As %String) As %Status [ Private ]
 {
-    Set rs = ##class(%SQL.Statement).%ExecDirect(, "DELETE FROM "_..SqlTableOf(pSearchTable)_" WHERE DocId = ?", ..%Id())
-    If rs.%SQLCODE < 0 Quit $$$ERROR($$$GeneralError, "Search table cleanup failed, SQLCODE="_rs.%SQLCODE_" "_rs.%Message)
+    Set tRs = ##class(%SQL.Statement).%ExecDirect(, "DELETE FROM "_..SqlTableOf(pSearchTable)_" WHERE DocId = ?", ..%Id())
+    If tRs.%SQLCODE < 0 Quit $$$ERROR($$$GeneralError, "Search table cleanup failed, SQLCODE="_tRs.%SQLCODE_" "_tRs.%Message)
     Quit $$$OK
 }
 
@@ -1402,9 +1475,9 @@ Method ClearIndexRows(pSearchTable As %String) As %Status [ Private ]
 /// Returns: "schema.table", or "" when the class does not exist
 ClassMethod SqlTableOf(pClass As %String) As %String [ Private ]
 {
-    Set c = ##class(%Dictionary.CompiledClass).%OpenId(pClass)
-    If '$IsObject(c) Quit ""
-    Quit c.SqlSchemaName_"."_c.SqlTableName
+    Set tC = ##class(%Dictionary.CompiledClass).%OpenId(pClass)
+    If '$IsObject(tC) Quit ""
+    Quit tC.SqlSchemaName_"."_tC.SqlTableName
 }
 
 /// Rebuilds one search table from scratch: deletes all its rows, then re-indexes every stored document whose search table is that class.<br>
@@ -1415,24 +1488,24 @@ ClassMethod Reindex(pSearchTable As %String, Output pCount As %Integer) As %Stat
 {
     Set pCount = 0
     If pSearchTable = "" Quit $$$ERROR($$$GeneralError, "Search table class is required")
-    Set tbl = ..SqlTableOf(pSearchTable)
-    If tbl = "" Quit $$$ERROR($$$GeneralError, "Class not found: "_pSearchTable)
-    Set rs0 = ##class(%SQL.Statement).%ExecDirect(, "DELETE FROM "_tbl)
-    If rs0.%SQLCODE < 0 Quit $$$ERROR($$$GeneralError, "Cleanup failed, SQLCODE="_rs0.%SQLCODE)
-    Set rs = ##class(%SQL.Statement).%ExecDirect(, "SELECT ID FROM JVDoc.Document")
-    Set sc = $$$OK
-    While rs.%Next() {
-        Set d = ..%OpenId(rs.%Get("ID"))
-        If '$IsObject(d) || (d.SearchTableClass() '= pSearchTable) Continue
-        Set isc = d.IndexNow(0)
-        If $$$ISERR(isc) {
-            Set st = $$$ERROR($$$GeneralError, "Document "_d.%Id()_": "_$System.Status.GetErrorText(isc))
-            Set sc = $Select(+sc:st, 1:$System.Status.AppendStatus(sc, st))
+    Set tTbl = ..SqlTableOf(pSearchTable)
+    If tTbl = "" Quit $$$ERROR($$$GeneralError, "Class not found: "_pSearchTable)
+    Set tRs0 = ##class(%SQL.Statement).%ExecDirect(, "DELETE FROM "_tTbl)
+    If tRs0.%SQLCODE < 0 Quit $$$ERROR($$$GeneralError, "Cleanup failed, SQLCODE="_tRs0.%SQLCODE)
+    Set tRs = ##class(%SQL.Statement).%ExecDirect(, "SELECT ID FROM JVDoc.Document")
+    Set tSC = $$$OK
+    While tRs.%Next() {
+        Set tD = ..%OpenId(tRs.%Get("ID"))
+        If '$IsObject(tD) || (tD.SearchTableClass() '= pSearchTable) Continue
+        Set tIsc = tD.IndexNow(0)
+        If $$$ISERR(tIsc) {
+            Set tSt = $$$ERROR($$$GeneralError, "Document "_tD.%Id()_": "_$System.Status.GetErrorText(tIsc))
+            Set tSC = $Select(+tSC:tSt, 1:$System.Status.AppendStatus(tSC, tSt))
             Continue
         }
         Set pCount = pCount + 1
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Called by the IndexDoc that a search table generates: collects the scalar values at a path, expanding () to every array element.<br>
@@ -1455,36 +1528,49 @@ Method FindSegmentValuesArray(pSegmentPropertyPath As %String, pSeparators As %S
 /// Returns: $$$OK; missing paths and non-scalar values are skipped
 Method CollectValues(pPath As %String, ByRef pArray As %String) As %Status [ Private ]
 {
-    Set p = $Find(pPath, "()")
-    If 'p {
-        Set val = ..Locate(pPath, .type, .cnt, .sc)
-        If $$$ISERR(sc) || (type = "object") || (type = "array") || (type = "null") || (val = "") Quit $$$OK
-        Set val = $Extract(val, 1, ..#SEARCHVALUEMAXLEN)
-        Set pArray(val) = $Get(pArray(val)) + 1
+    Set tP = $Find(pPath, "()")
+    If 'tP {
+        Set tVal = ..Locate(pPath, .tType, .tCnt, .tSC)
+        If $$$ISERR(tSC) || (tType = "object") || (tType = "array") || (tType = "null") || (tVal = "") Quit $$$OK
+        Set tVal = $Extract(tVal, 1, ..#SEARCHVALUEMAXLEN)
+        Set pArray(tVal) = $Get(pArray(tVal)) + 1
         Quit $$$OK
     }
-    Set head = $Extract(pPath, 1, p-3), tail = $Extract(pPath, p, *)
-    Set idx = ""
+    Set tHead = $Extract(pPath, 1, tP-3), tTail = $Extract(pPath, tP, *)
+    Set tIdx = ""
     For {
-        Set idx = ..GetNextIndex(head_"()", idx, .nsc)
-        If $$$ISERR(nsc) || (idx = "") Quit
-        Do ..CollectValues(head_"("_idx_")"_tail, .pArray)
+        Set tIdx = ..GetNextIndex(tHead_"()", tIdx, .tNsc)
+        If $$$ISERR(tNsc) || (tIdx = "") Quit
+        Do ..CollectValues(tHead_"("_tIdx_")"_tTail, .pArray)
     }
     Quit $$$OK
 }
 
 // ---------------- Persistence callbacks ----------------
 
-/// Decides whether the search table rows must be rebuilt after this save (new document, changed content or changed DocType), then serializes a modified Obj back to Raw.<br>
+/// Decides whether the search table rows must be rebuilt after this save: new document, content rewritten by %OnAddToSaveSet, or changed DocType.<br>
 /// <var>pInsert</var>: 1 when the document is saved for the first time<br>
 /// Returns: $$$OK
 Method %OnBeforeSave(pInsert As %Boolean) As %Status [ Private, ServerOnly = 1 ]
 {
-    Set ..NeedsIndex = pInsert || ..Dirty || (..DocType '= ..IndexedDocType)
+    Set ..NeedsIndex = pInsert || ..ContentChanged || (..DocType '= ..IndexedDocType)
+    Set ..ContentChanged = 0
+    Quit $$$OK
+}
+
+/// Serializes a modified Obj back to Raw at the start of %Save. This must happen here and not in %OnBeforeSave: %OnBeforeSave runs inside
+/// %SerializeObject, after the stream references have been taken, so rewriting a Raw that is already stored (a document opened from the
+/// database, or a clone of one as DTL create='copy' makes) would leave the saved document pointing to an empty stream.<br>
+/// <var>depth</var>: save depth passed by %Save<br>
+/// <var>insert</var>: 1 when the document is new<br>
+/// <var>callcount</var>: how often the hook has run in this save; the rewrite happens once because Dirty is cleared<br>
+/// Returns: $$$OK
+Method %OnAddToSaveSet(depth As %Integer = 3, insert As %Integer = 0, callcount As %Integer = 0) As %Status [ Private, ServerOnly = 1 ]
+{
     If ..Dirty && $IsObject(..Obj) {
         Do ..Raw.Clear()
         Do ..Obj.%ToJSON(..Raw)
-        Set ..Dirty = 0
+        Set ..Dirty = 0, ..ContentChanged = 1
     }
     Quit $$$OK
 }
@@ -1496,21 +1582,21 @@ Method %OnAfterSave(pInsert As %Boolean) As %Status [ Private, ServerOnly = 1 ]
 {
     If '..NeedsIndex Quit $$$OK
     Try {
-        Set sc = $$$OK
+        Set tSC = $$$OK
         If 'pInsert && (..IndexedDocType '= "") && (..IndexedDocType '= ..DocType) {
-            Set oldSt = ##class(JVDoc.Schema).GetSearchTable(..IndexedDocType)
-            If oldSt = "" Set oldSt = ..#SEARCHTABLE
-            If (oldSt '= "") && (oldSt '= ..SearchTableClass()) Set sc = ..ClearIndexRows(oldSt)
+            Set tOldSt = ##class(JVDoc.Schema).GetSearchTable(..IndexedDocType)
+            If tOldSt = "" Set tOldSt = ..#SEARCHTABLE
+            If (tOldSt '= "") && (tOldSt '= ..SearchTableClass()) Set tSC = ..ClearIndexRows(tOldSt)
         }
-        If $$$ISOK(sc) Set sc = ..IndexNow('pInsert)
-        If $$$ISERR(sc) {
-            Do ##class(Ens.Util.Log).LogStatus($classname(), "%OnAfterSave", sc)
+        If $$$ISOK(tSC) Set tSC = ..IndexNow('pInsert)
+        If $$$ISERR(tSC) {
+            Do ##class(Ens.Util.Log).LogStatus($classname(), "%OnAfterSave", tSC)
         } Else {
             Set ..IndexedDocType = ..DocType
         }
     }
-    Catch ex {
-        Do ##class(Ens.Util.Log).LogStatus($classname(), "%OnAfterSave", ex.AsStatus())
+    Catch tEx {
+        Do ##class(Ens.Util.Log).LogStatus($classname(), "%OnAfterSave", tEx.AsStatus())
     }
     Quit $$$OK
 }
@@ -1557,38 +1643,38 @@ Method %ShowContents(pZenOutput As %Boolean = 0)
 /// <var>pZenOutput</var>: passed by the product; ignored
 Method OnShowJSONContents(pZenOutput As %Boolean = 0)
 {
-    Set obj = ..GetObj(.sc)
-    If $$$ISERR(sc) || '$IsObject(obj) {
+    Set tObj = ..GetObj(.tSC)
+    If $$$ISERR(tSC) || '$IsObject(tObj) {
         Do ..Raw.Rewind()
         Do ..Raw.OutputToDevice()
         Quit
     }
-    Do ..OutputFormattedJSON(obj)
+    Do ..OutputFormattedJSON(tObj)
 }
 
 /// Builds the HTML view of the document: the DocType and the JSON indented inside a pre element; the raw text is shown when the JSON does not parse.<br>
 /// Returns: the HTML fragment, truncated after 200000 characters of content with a "(content truncated)" note
 Method ContentsHTML() As %String
 {
-    Set max = 200000
-    Set obj = ..GetObj(.sc)
-    If $$$ISERR(sc) || '$IsObject(obj) {
+    Set tMax = 200000
+    Set tObj = ..GetObj(.tSC)
+    If $$$ISERR(tSC) || '$IsObject(tObj) {
         Do ..Raw.Rewind()
-        Set txt = ..Raw.Read(max)
+        Set tTxt = ..Raw.Read(tMax)
     } Else {
-        Set fmt = ##class(%JSON.Formatter).%New()
-        Set fmt.Indent = 1, fmt.IndentChars = "  ", fmt.LineTerminator = $Char(10)
-        Set fsc = fmt.FormatToString(..ToJSONString(obj), .txt)
-        If $$$ISERR(fsc) Set txt = ..ToJSONString(obj)
+        Set tFmt = ##class(%JSON.Formatter).%New()
+        Set tFmt.Indent = 1, tFmt.IndentChars = "  ", tFmt.LineTerminator = $Char(10)
+        Set tFsc = tFmt.FormatToString(..ToJSONString(tObj), .tTxt)
+        If $$$ISERR(tFsc) Set tTxt = ..ToJSONString(tObj)
     }
-    Set more = ($Length(txt) > max)
-    If more Set txt = $Extract(txt, 1, max)
-    Set txt = $Translate(txt, $Char(13))
-    Set out = "<div>"_$Char(10)
-    Set out = out_"<div><b>DocType:</b> "_$ZConvert(..DocType, "O", "HTML")_"</div>"_$Char(10)
-    Set out = out_"<pre style=""font-family:monospace; white-space:pre; overflow:auto;"">"_$ZConvert(txt, "O", "HTML")_"</pre>"_$Char(10)
-    If more Set out = out_"<div><i>(content truncated)</i></div>"_$Char(10)
-    Quit out_"</div>"_$Char(10)
+    Set tMore = ($Length(tTxt) > tMax)
+    If tMore Set tTxt = $Extract(tTxt, 1, tMax)
+    Set tTxt = $Translate(tTxt, $Char(13))
+    Set tOut = "<div>"_$Char(10)
+    Set tOut = tOut_"<div><b>DocType:</b> "_$ZConvert(..DocType, "O", "HTML")_"</div>"_$Char(10)
+    Set tOut = tOut_"<pre style=""font-family:monospace; white-space:pre; overflow:auto;"">"_$ZConvert(tTxt, "O", "HTML")_"</pre>"_$Char(10)
+    If tMore Set tOut = tOut_"<div><i>(content truncated)</i></div>"_$Char(10)
+    Quit tOut_"</div>"_$Char(10)
 }
 
 Storage Default

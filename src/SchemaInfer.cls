@@ -19,15 +19,15 @@ Parameter MAXARRAYITEMS = 1000;
 /// Returns: $$$OK, or an error when the sample does not parse or its root is not an object
 ClassMethod FromSample(pCategory As %String, pName As %String, pSample, pMaxDepth As %Integer = 12, pRequired As %Boolean = 0) As %Status
 {
-    Set sc = $$$OK
+    Set tSC = $$$OK
     Try {
-        Set arr = []
-        Do arr.%Push(##class(%DynamicAbstractObject).%FromJSON(pSample))
-        Set sc = ..FromSamples(pCategory, pName, arr, pMaxDepth, pRequired)
-    } Catch ex {
-        Set sc = ex.AsStatus()
+        Set tArr = []
+        Do tArr.%Push(##class(%DynamicAbstractObject).%FromJSON(pSample))
+        Set tSC = ..FromSamples(pCategory, pName, tArr, pMaxDepth, pRequired)
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Infers a DocType from several samples and saves it as pCategory:pName. The samples' field trees are merged
@@ -42,22 +42,22 @@ ClassMethod FromSample(pCategory As %String, pName As %String, pSample, pMaxDept
 ClassMethod FromSamples(pCategory As %String, pName As %String, pSamples As %DynamicArray, pMaxDepth As %Integer = 12, pRequired As %Boolean = 0) As %Status
 {
     Kill ^||JVDoc.Warn
-    Set sc = $$$OK
+    Set tSC = $$$OK
     Try {
-        Set acc = ""
-        Set it = pSamples.%GetIterator()
-        While it.%GetNext(.i, .s, .t) {
-            If t '= "object" Throw ##class(%Exception.General).%New("Sample", 5001, , "sample #"_(i+1)_" is not a JSON object")
-            Set node = ..Infer("", s, t, 0, pMaxDepth, "")
-            If acc = "" { Set acc = node } Else { Do ..Merge(acc, node, "") }
+        Set tAcc = ""
+        Set tIt = pSamples.%GetIterator()
+        While tIt.%GetNext(.tI, .tS, .tT) {
+            If tT '= "object" Throw ##class(%Exception.General).%New("Sample", 5001, , "sample #"_(tI+1)_" is not a JSON object")
+            Set tNode = ..Infer("", tS, tT, 0, pMaxDepth, "")
+            If tAcc = "" { Set tAcc = tNode } Else { Do ..Merge(tAcc, tNode, "") }
         }
-        If acc = "" Throw ##class(%Exception.General).%New("Sample", 5001, , "no samples given")
-        Do ..Finalize(acc, "", pRequired)
-        Set sc = ##class(JVDoc.Schema).Save(pCategory, pName, acc)
-    } Catch ex {
-        Set sc = ex.AsStatus()
+        If tAcc = "" Throw ##class(%Exception.General).%New("Sample", 5001, , "no samples given")
+        Do ..Finalize(tAcc, "", pRequired)
+        Set tSC = ##class(JVDoc.Schema).Save(pCategory, pName, tAcc)
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Reads a UTF-8 file and infers a DocType from it. A file that holds an array without pMulti=1 is an error rather than a wrong schema.<br>
@@ -70,29 +70,29 @@ ClassMethod FromSamples(pCategory As %String, pName As %String, pSamples As %Dyn
 /// Returns: $$$OK, or an error when the file is missing or empty, does not parse, or holds an array without pMulti=1
 ClassMethod FromSampleFile(pCategory As %String, pName As %String, pFile As %String, pMulti As %Boolean = 0, pMaxDepth As %Integer = 12, pRequired As %Boolean = 0) As %Status
 {
-    Set sc = $$$OK
+    Set tSC = $$$OK
     Try {
-        Set s = ##class(%Stream.FileCharacter).%New()
-        Set s.TranslateTable = "UTF8"
-        Set sc = s.LinkToFile(pFile)
-        If $$$ISERR(sc) Quit
-        If s.Size = 0 {
-            Set sc = $$$ERROR($$$GeneralError, "File is empty or not readable: "_pFile)
+        Set tS = ##class(%Stream.FileCharacter).%New()
+        Set tS.TranslateTable = "UTF8"
+        Set tSC = tS.LinkToFile(pFile)
+        If $$$ISERR(tSC) Quit
+        If tS.Size = 0 {
+            Set tSC = $$$ERROR($$$GeneralError, "File is empty or not readable: "_pFile)
             Quit
         }
-        Set data = ##class(%DynamicAbstractObject).%FromJSON(s)
-        If $ClassName(data) = "%Library.DynamicArray" {
+        Set tData = ##class(%DynamicAbstractObject).%FromJSON(tS)
+        If $ClassName(tData) = "%Library.DynamicArray" {
             If 'pMulti Throw ##class(%Exception.General).%New("Sample", 5001, , "file holds a JSON array; pass pMulti=1 to treat each element as one sample")
-            Set arr = data
+            Set tArr = tData
         } Else {
-            Set arr = []
-            Do arr.%Push(data)
+            Set tArr = []
+            Do tArr.%Push(tData)
         }
-        Set sc = ..FromSamples(pCategory, pName, arr, pMaxDepth, pRequired)
-    } Catch ex {
-        Set sc = ex.AsStatus()
+        Set tSC = ..FromSamples(pCategory, pName, tArr, pMaxDepth, pRequired)
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
-    Quit sc
+    Quit tSC
 }
 
 /// Infers a DocType from JVDoc.Document messages already stored in this namespace; only structure is recorded, never field values.
@@ -107,43 +107,43 @@ ClassMethod FromSampleFile(pCategory As %String, pName As %String, pFile As %Str
 ClassMethod FromStoredDocs(pCategory As %String, pName As %String, pFilterDocType As %String = "", pMaxDocs As %Integer = 200, pMaxDepth As %Integer = 12, pRequired As %Boolean = 0) As %Status
 {
     Kill ^||JVDoc.Warn
-    Set sc = $$$OK
+    Set tSC = $$$OK
     Try {
-        Set sql = "SELECT TOP "_(+pMaxDocs)_" ID FROM JVDoc.Document"
-        If pFilterDocType '= "" Set sql = sql_" WHERE DocType = ?"
-        Set sql = sql_" ORDER BY ID DESC"
-        Set st = ##class(%SQL.Statement).%New()
-        Set sc = st.%Prepare(sql)
-        If $$$ISERR(sc) Quit
-        If pFilterDocType '= "" { Set rs = st.%Execute(pFilterDocType) } Else { Set rs = st.%Execute() }
-        If rs.%SQLCODE < 0 {
-            Set sc = $$$ERROR($$$GeneralError, "Query failed: "_rs.%Message)
+        Set tSql = "SELECT TOP "_(+pMaxDocs)_" ID FROM JVDoc.Document"
+        If pFilterDocType '= "" Set tSql = tSql_" WHERE DocType = ?"
+        Set tSql = tSql_" ORDER BY ID DESC"
+        Set tSt = ##class(%SQL.Statement).%New()
+        Set tSC = tSt.%Prepare(tSql)
+        If $$$ISERR(tSC) Quit
+        If pFilterDocType '= "" { Set tRs = tSt.%Execute(pFilterDocType) } Else { Set tRs = tSt.%Execute() }
+        If tRs.%SQLCODE < 0 {
+            Set tSC = $$$ERROR($$$GeneralError, "Query failed: "_tRs.%Message)
             Quit
         }
-        Set acc = "", used = 0, skipped = 0
-        While rs.%Next() {
-            Set d = ##class(JVDoc.Document).%OpenId(rs.%Get("ID"))
-            If '$IsObject(d) { Set skipped = skipped + 1  Continue }
-            Set obj = d.GetObj(.gsc)
-            If $$$ISERR(gsc) || '$IsObject(obj) || ($ClassName(obj) '= "%Library.DynamicObject") {
-                Set skipped = skipped + 1
+        Set tAcc = "", tUsed = 0, tSkipped = 0
+        While tRs.%Next() {
+            Set tD = ##class(JVDoc.Document).%OpenId(tRs.%Get("ID"))
+            If '$IsObject(tD) { Set tSkipped = tSkipped + 1  Continue }
+            Set tObj = tD.GetObj(.tGsc)
+            If $$$ISERR(tGsc) || '$IsObject(tObj) || ($ClassName(tObj) '= "%Library.DynamicObject") {
+                Set tSkipped = tSkipped + 1
                 Continue
             }
-            Set node = ..Infer("", obj, "object", 0, pMaxDepth, "")
-            If acc = "" { Set acc = node } Else { Do ..Merge(acc, node, "") }
-            Set used = used + 1
+            Set tNode = ..Infer("", tObj, "object", 0, pMaxDepth, "")
+            If tAcc = "" { Set tAcc = tNode } Else { Do ..Merge(tAcc, tNode, "") }
+            Set tUsed = tUsed + 1
         }
-        If used = 0 {
-            Set sc = $$$ERROR($$$GeneralError, "No usable stored documents found")
+        If tUsed = 0 {
+            Set tSC = $$$ERROR($$$GeneralError, "No usable stored documents found")
             Quit
         }
-        Do ..Finalize(acc, "", pRequired)
-        Do ##class(JVDoc.SchemaImport).Warn("info: inferred from "_used_" stored document(s), skipped "_skipped)
-        Set sc = ##class(JVDoc.Schema).Save(pCategory, pName, acc)
-    } Catch ex {
-        Set sc = ex.AsStatus()
+        Do ..Finalize(tAcc, "", pRequired)
+        Do ##class(JVDoc.SchemaImport).Warn("info: inferred from "_tUsed_" stored document(s), skipped "_tSkipped)
+        Set tSC = ##class(JVDoc.Schema).Save(pCategory, pName, tAcc)
+    } Catch tEx {
+        Set tSC = tEx.AsStatus()
     }
-    Quit sc
+    Quit tSC
 }
 
 // ---------------- Inference ----------------
@@ -162,49 +162,49 @@ ClassMethod FromStoredDocs(pCategory As %String, pName As %String, pFilterDocTyp
 ClassMethod Infer(pName, pVal, pType As %String, pDepth As %Integer, pMax As %Integer, pPath As %String) As %DynamicObject [ Private ]
 {
     If pType = "object" {
-        Set node = {"name":(pName), "type":"object", "children":[], "_n":1}
+        Set tNode = {"name":(pName), "type":"object", "children":[], "_n":1}
         If pDepth >= pMax {
             Do ##class(JVDoc.SchemaImport).Warn("truncated at depth "_pDepth_" under '"_pPath_"'")
-            Do node.%Set("truncated", 1, "boolean")
-            Quit node
+            Do tNode.%Set("truncated", 1, "boolean")
+            Quit tNode
         }
-        Set it = pVal.%GetIterator()
-        While it.%GetNext(.k, .v, .t) {
-            If ##class(JVDoc.SchemaImport).BadName(k) {
-                Do ##class(JVDoc.SchemaImport).Warn("skip property '"_k_"' under '"_$Select(pPath = "":"(root)", 1:pPath)_"' (name not usable in a VDoc path)")
+        Set tIt = pVal.%GetIterator()
+        While tIt.%GetNext(.tK, .tV, .tT) {
+            If ##class(JVDoc.SchemaImport).BadName(tK) {
+                Do ##class(JVDoc.SchemaImport).Warn("skip property '"_tK_"' under '"_$Select(pPath = "":"(root)", 1:pPath)_"' (name not usable in a VDoc path)")
                 Continue
             }
-            Set c = ..Infer(k, v, t, pDepth+1, pMax, pPath_$Select(pPath = "":"", 1:".")_k)
-            Do c.%Set("_seen", 1)
-            Do node.children.%Push(c)
+            Set tC = ..Infer(tK, tV, tT, pDepth+1, pMax, pPath_$Select(pPath = "":"", 1:".")_tK)
+            Do tC.%Set("_seen", 1)
+            Do tNode.children.%Push(tC)
         }
-        Quit node
+        Quit tNode
     }
     If pType = "array" {
-        Set node = {"name":(pName), "type":"array"}
-        Set items = ""
-        Set it = pVal.%GetIterator()
-        While it.%GetNext(.k, .v, .t) {
-            If k >= ..#MAXARRAYITEMS {
+        Set tNode = {"name":(pName), "type":"array"}
+        Set tItems = ""
+        Set tIt = pVal.%GetIterator()
+        While tIt.%GetNext(.tK, .tV, .tT) {
+            If tK >= ..#MAXARRAYITEMS {
                 Do ##class(JVDoc.SchemaImport).Warn("array '"_pPath_"' has more than "_..#MAXARRAYITEMS_" items; only the first ones were inspected")
                 Quit
             }
-            Set e = ..Infer("", v, t, pDepth+1, pMax, pPath_"()")
-            If items = "" { Set items = e } Else { Do ..Merge(items, e, pPath_"()") }
+            Set tE = ..Infer("", tV, tT, pDepth+1, pMax, pPath_"()")
+            If tItems = "" { Set tItems = tE } Else { Do ..Merge(tItems, tE, pPath_"()") }
         }
-        If items = "" Set items = {"name":"", "type":""}
-        Do node.%Set("items", items)
-        Quit node
+        If tItems = "" Set tItems = {"name":"", "type":""}
+        Do tNode.%Set("items", tItems)
+        Quit tNode
     }
 
-    Set st = $Case(pType, "boolean":"boolean", "null":"", "number":$Select(pVal = (pVal\1):"integer", 1:"number"), :"string")
-    Set node = {"name":(pName), "type":(st)}
-    If st '= "" {
-        Set tc = {}
-        Do tc.%Set(st, 1, "number")
-        Do node.%Set("_tc", tc)
+    Set tSt = $Case(pType, "boolean":"boolean", "null":"", "number":$Select(pVal = (pVal\1):"integer", 1:"number"), :"string")
+    Set tNode = {"name":(pName), "type":(tSt)}
+    If tSt '= "" {
+        Set tTc = {}
+        Do tTc.%Set(tSt, 1, "number")
+        Do tNode.%Set("_tc", tTc)
     }
-    Quit node
+    Quit tNode
 }
 
 /// Merges raw node pB into pA in place and returns pA. An untyped pA adopts pB; an untyped pB changes nothing; two scalars add their
@@ -216,36 +216,36 @@ ClassMethod Infer(pName, pVal, pType As %String, pDepth As %Integer, pMax As %In
 /// Returns: pA
 ClassMethod Merge(pA As %DynamicObject, pB As %DynamicObject, pPath As %String) As %DynamicObject [ Private ]
 {
-    Set ta = pA.type, tb = pB.type
-    If ta = "" Quit ..Adopt(pA, pB)
-    If tb = "" Quit pA
-    If ..IsScalar(ta) && ..IsScalar(tb) {
+    Set tTa = pA.type, tTb = pB.type
+    If tTa = "" Quit ..Adopt(pA, pB)
+    If tTb = "" Quit pA
+    If ..IsScalar(tTa) && ..IsScalar(tTb) {
         // Both sides are scalars: accumulate type counts; the winning type is decided by majority in Finalize
-        Set ca = pA.%Get("_tc"), cb = pB.%Get("_tc")
-        Set it = cb.%GetIterator()
-        While it.%GetNext(.k, .v) { Do ca.%Set(k, +ca.%Get(k) + v, "number") }
+        Set tCa = pA.%Get("_tc"), tCb = pB.%Get("_tc")
+        Set tIt = tCb.%GetIterator()
+        While tIt.%GetNext(.tK, .tV) { Do tCa.%Set(tK, +tCa.%Get(tK) + tV, "number") }
         Quit pA
     }
-    If ta = "any" Quit pA
-    If (tb = "any") || (ta '= tb) {
+    If tTa = "any" Quit pA
+    If (tTb = "any") || (tTa '= tTb) {
         // Kind mismatch between object, array, and scalar; the node becomes any
-        Do ##class(JVDoc.SchemaImport).Warn("mixed kinds at '"_pPath_"': "_ta_" vs "_tb_"; typed as any")
+        Do ##class(JVDoc.SchemaImport).Warn("mixed kinds at '"_pPath_"': "_tTa_" vs "_tTb_"; typed as any")
         Quit ..MakeAny(pA)
     }
-    If ta = "object" {
+    If tTa = "object" {
         Do pA.%Set("_n", pA.%Get("_n") + pB.%Get("_n"))
-        Set it = pB.children.%GetIterator()
-        While it.%GetNext(.k, .bc) {
-            Set ac = ..FindChild(pA.children, bc.name)
-            If ac = "" {
-                Do pA.children.%Push(bc)
+        Set tIt = pB.children.%GetIterator()
+        While tIt.%GetNext(.tK, .tBc) {
+            Set tAc = ..FindChild(pA.children, tBc.name)
+            If tAc = "" {
+                Do pA.children.%Push(tBc)
             } Else {
-                Set seen = ac.%Get("_seen") + bc.%Get("_seen")
-                Do ..Merge(ac, bc, pPath_$Select(pPath = "":"", 1:".")_bc.name)
-                Do ac.%Set("_seen", seen)
+                Set tSeen = tAc.%Get("_seen") + tBc.%Get("_seen")
+                Do ..Merge(tAc, tBc, pPath_$Select(pPath = "":"", 1:".")_tBc.name)
+                Do tAc.%Set("_seen", tSeen)
             }
         }
-    } ElseIf ta = "array" {
+    } ElseIf tTa = "array" {
         Do ..Merge(pA.items, pB.items, pPath_"()")
     }
     Quit pA
@@ -258,10 +258,10 @@ ClassMethod Merge(pA As %DynamicObject, pB As %DynamicObject, pPath As %String) 
 /// Returns: pA
 ClassMethod Adopt(pA As %DynamicObject, pB As %DynamicObject) As %DynamicObject [ Private ]
 {
-    Set it = pB.%GetIterator()
-    While it.%GetNext(.k, .v, .t) {
-        If (k = "name") || (k = "_seen") Continue
-        If $IsObject(v) { Do pA.%Set(k, v) } Else { Do pA.%Set(k, v, t) }
+    Set tIt = pB.%GetIterator()
+    While tIt.%GetNext(.tK, .tV, .tT) {
+        If (tK = "name") || (tK = "_seen") Continue
+        If $IsObject(tV) { Do pA.%Set(tK, tV) } Else { Do pA.%Set(tK, tV, tT) }
     }
     Quit pA
 }
@@ -272,7 +272,7 @@ ClassMethod Adopt(pA As %DynamicObject, pB As %DynamicObject) As %DynamicObject 
 ClassMethod MakeAny(pNode As %DynamicObject) As %DynamicObject [ Private ]
 {
     Do pNode.%Set("type", "any")
-    For k = "children", "items", "_n", "_tc", "truncated" { Do pNode.%Remove(k) }
+    For tK = "children", "items", "_n", "_tc", "truncated" { Do pNode.%Remove(tK) }
     Quit pNode
 }
 
@@ -282,12 +282,12 @@ ClassMethod MakeAny(pNode As %DynamicObject) As %DynamicObject [ Private ]
 /// Returns: the child node, or "" when there is none
 ClassMethod FindChild(pChildren As %DynamicArray, pName As %String) [ Private ]
 {
-    Set found = ""
-    Set it = pChildren.%GetIterator()
-    While it.%GetNext(.k, .c) {
-        If c.name = pName { Set found = c  Quit }
+    Set tFound = ""
+    Set tIt = pChildren.%GetIterator()
+    While tIt.%GetNext(.tK, .tC) {
+        If tC.name = pName { Set tFound = tC  Quit }
     }
-    Quit found
+    Quit tFound
 }
 
 /// Tests whether a field-tree type is a scalar type.<br>
@@ -312,38 +312,38 @@ ClassMethod Finalize(pNode As %DynamicObject, pPath As %String, pRequired As %Bo
         Do ##class(JVDoc.SchemaImport).Warn("no value seen to infer a type at '"_$Select(pPath = "":"(root)", 1:pPath)_"' (null or empty array); assumed string")
     }
 
-    Set tc = pNode.%Get("_tc")
-    If $IsObject(tc) {
-        Set cnt("string") = +tc.%Get("string"), cnt("boolean") = +tc.%Get("boolean"), cnt("num") = +tc.%Get("integer") + tc.%Get("number")
-        Set best = $Case(pNode.type, "integer":"num", "number":"num", :pNode.type)
-        Set k = ""
+    Set tTc = pNode.%Get("_tc")
+    If $IsObject(tTc) {
+        Set tCnt("string") = +tTc.%Get("string"), tCnt("boolean") = +tTc.%Get("boolean"), tCnt("num") = +tTc.%Get("integer") + tTc.%Get("number")
+        Set tBest = $Case(pNode.type, "integer":"num", "number":"num", :pNode.type)
+        Set tK = ""
         For {
-            Set k = $Order(cnt(k))
-            If k = "" Quit
-            If cnt(k) > cnt(best) Set best = k
+            Set tK = $Order(tCnt(tK))
+            If tK = "" Quit
+            If tCnt(tK) > tCnt(tBest) Set tBest = tK
         }
-        Set kinds = 0, desc = "", k = ""
+        Set tKinds = 0, tDesc = "", tK = ""
         For {
-            Set k = $Order(cnt(k))
-            If k = "" Quit
-            If cnt(k) > 0 {
-                Set kinds = kinds + 1
-                Set desc = desc_$Select(desc = "":"", 1:", ")_$Select(k = "num":"numeric", 1:k)_"("_cnt(k)_")"
+            Set tK = $Order(tCnt(tK))
+            If tK = "" Quit
+            If tCnt(tK) > 0 {
+                Set tKinds = tKinds + 1
+                Set tDesc = tDesc_$Select(tDesc = "":"", 1:", ")_$Select(tK = "num":"numeric", 1:tK)_"("_tCnt(tK)_")"
             }
         }
-        If kinds > 1 Do ##class(JVDoc.SchemaImport).Warn("mixed types at '"_$Select(pPath = "":"(root)", 1:pPath)_"': "_desc_"; chose "_$Select(best = "num":"numeric", 1:best))
-        Do pNode.%Set("type", $Select(best = "num":$Select(+tc.%Get("number") > 0:"number", 1:"integer"), 1:best))
+        If tKinds > 1 Do ##class(JVDoc.SchemaImport).Warn("mixed types at '"_$Select(pPath = "":"(root)", 1:pPath)_"': "_tDesc_"; chose "_$Select(tBest = "num":"numeric", 1:tBest))
+        Do pNode.%Set("type", $Select(tBest = "num":$Select(+tTc.%Get("number") > 0:"number", 1:"integer"), 1:tBest))
         Do pNode.%Remove("_tc")
     }
 
     If pNode.type = "object" {
-        Set n = pNode.%Get("_n")
+        Set tN = pNode.%Get("_n")
         Do pNode.%Remove("_n")
-        Set it = pNode.children.%GetIterator()
-        While it.%GetNext(.k, .c) {
-            If 'pRequired || (c.%Get("_seen") < n) Do c.%Set("opt", 1, "boolean")
-            Do c.%Remove("_seen")
-            Do ..Finalize(c, pPath_$Select(pPath = "":"", 1:".")_c.name, pRequired)
+        Set tIt = pNode.children.%GetIterator()
+        While tIt.%GetNext(.tK, .tC) {
+            If 'pRequired || (tC.%Get("_seen") < tN) Do tC.%Set("opt", 1, "boolean")
+            Do tC.%Remove("_seen")
+            Do ..Finalize(tC, pPath_$Select(pPath = "":"", 1:".")_tC.name, pRequired)
         }
     } ElseIf pNode.type = "array" {
         Do ..Finalize(pNode.items, pPath_"()", pRequired)
@@ -358,11 +358,11 @@ ClassMethod Finalize(pNode As %DynamicObject, pPath As %String, pRequired As %Bo
 /// Returns: the JSON Schema as a %DynamicObject with $schema set, or "" for an unknown DocType
 ClassMethod ToJSONSchema(pDocType As %String)
 {
-    Set tree = ##class(JVDoc.Schema).GetTree(pDocType)
-    If '$IsObject(tree) Quit ""
-    Set out = ..SchemaOf(tree)
-    Do out.%Set("$schema", "https://json-schema.org/draft/2020-12/schema")
-    Quit out
+    Set tTree = ##class(JVDoc.Schema).GetTree(pDocType)
+    If '$IsObject(tTree) Quit ""
+    Set tOut = ..SchemaOf(tTree)
+    Do tOut.%Set("$schema", "https://json-schema.org/draft/2020-12/schema")
+    Quit tOut
 }
 
 /// Converts one field-tree node (and its subtree) back into a JSON Schema object: type (omitted for any), description, enum, pattern and the
@@ -373,106 +373,106 @@ ClassMethod ToJSONSchema(pDocType As %String)
 /// Returns: a new %DynamicObject holding the JSON Schema for the node
 ClassMethod SchemaOf(pNode As %DynamicObject) As %DynamicObject [ Private ]
 {
-    If pNode.type = "any" { Set s = {} } Else { Set s = {"type":(pNode.type)} }
-    If pNode.desc '= "" Do s.%Set("description", pNode.desc)
-    If $IsObject(pNode.%Get("enum")) Do s.%Set("enum", pNode.enum)
-    If pNode.%Get("pattern") '= "" Do s.%Set("pattern", pNode.pattern)
-    Set kl = ##class(JVDoc.SchemaImport).ConstraintKeys()
-    For i = 1:1:$ListLength(kl) { Do ##class(JVDoc.SchemaImport).CopyTyped(pNode, s, $List(kl, i)) }
+    If pNode.type = "any" { Set tS = {} } Else { Set tS = {"type":(pNode.type)} }
+    If pNode.desc '= "" Do tS.%Set("description", pNode.desc)
+    If $IsObject(pNode.%Get("enum")) Do tS.%Set("enum", pNode.enum)
+    If pNode.%Get("pattern") '= "" Do tS.%Set("pattern", pNode.pattern)
+    Set tKl = ##class(JVDoc.SchemaImport).ConstraintKeys()
+    For tI = 1:1:$ListLength(tKl) { Do ##class(JVDoc.SchemaImport).CopyTyped(pNode, tS, $List(tKl, tI)) }
     // A draft-04 boolean exclusiveMinimum/exclusiveMaximum is written in the numeric form 2020-12 requires
-    For bk = "Minimum", "Maximum" {
-        Set ek = "exclusive"_bk, mk = $ZConvert(bk, "L")
-        If s.%GetTypeOf(ek) = "boolean" {
-            If s.%Get(ek) && (s.%GetTypeOf(mk) = "number") {
-                Do s.%Set(ek, s.%Get(mk), "number")
-                Do s.%Remove(mk)
+    For tBk = "Minimum", "Maximum" {
+        Set tEk = "exclusive"_tBk, tMk = $ZConvert(tBk, "L")
+        If tS.%GetTypeOf(tEk) = "boolean" {
+            If tS.%Get(tEk) && (tS.%GetTypeOf(tMk) = "number") {
+                Do tS.%Set(tEk, tS.%Get(tMk), "number")
+                Do tS.%Remove(tMk)
             } Else {
-                Do s.%Remove(ek)
+                Do tS.%Remove(tEk)
             }
         }
     }
-    Set extra = []
+    Set tExtra = []
     If $IsObject(pNode.%Get("nots")) && pNode.nots.%Size() {
         If pNode.nots.%Size() = 1 {
-            Do s.%Set("not", ..SchemaOf(pNode.nots.%Get(0)))
+            Do tS.%Set("not", ..SchemaOf(pNode.nots.%Get(0)))
         } Else {
-            Set itn = pNode.nots.%GetIterator()
-            While itn.%GetNext(.nk, .nsub) {
-                Set e = {}
-                Do e.%Set("not", ..SchemaOf(nsub))
-                Do extra.%Push(e)
+            Set tItn = pNode.nots.%GetIterator()
+            While tItn.%GetNext(.tNk, .tNsub) {
+                Set tE = {}
+                Do tE.%Set("not", ..SchemaOf(tNsub))
+                Do tExtra.%Push(tE)
             }
         }
     }
     // oneOf / anyOf: the first group is written directly on the node; additional groups of the same keyword are placed into allOf
     If $IsObject(pNode.%Get("alts")) {
-        Set itg = pNode.alts.%GetIterator()
-        While itg.%GetNext(.gk, .ge) {
-            Set arr = []
-            Set ita = ge.list.%GetIterator()
-            While ita.%GetNext(.ak, .an) { Do arr.%Push(..SchemaOf(an)) }
-            If s.%IsDefined(ge.kw) {
-                Set e = {}
-                Do e.%Set(ge.kw, arr)
-                Do extra.%Push(e)
+        Set tItg = pNode.alts.%GetIterator()
+        While tItg.%GetNext(.tGk, .tGe) {
+            Set tArr = []
+            Set tIta = tGe.list.%GetIterator()
+            While tIta.%GetNext(.tAk, .tAn) { Do tArr.%Push(..SchemaOf(tAn)) }
+            If tS.%IsDefined(tGe.kw) {
+                Set tE = {}
+                Do tE.%Set(tGe.kw, tArr)
+                Do tExtra.%Push(tE)
             } Else {
-                Do s.%Set(ge.kw, arr)
+                Do tS.%Set(tGe.kw, tArr)
             }
         }
     }
     // allOf members
     If $IsObject(pNode.%Get("alls")) {
-        Set itm = pNode.alls.%GetIterator()
-        While itm.%GetNext(.mk, .mn) { Do extra.%Push(..SchemaOf(mn)) }
+        Set tItm = pNode.alls.%GetIterator()
+        While tItm.%GetNext(.tMk, .tMn) { Do tExtra.%Push(..SchemaOf(tMn)) }
     }
     If pNode.type = "object" {
-        Set props = {}, req = []
-        Set it = pNode.children.%GetIterator()
-        While it.%GetNext(.k, .c) {
-            If c.%Get("fromAlt") Continue
-            Do props.%Set(c.name, ..SchemaOf(c))
-            If 'c.%Get("opt") Do req.%Push(c.name)
+        Set tProps = {}, tReq = []
+        Set tIt = pNode.children.%GetIterator()
+        While tIt.%GetNext(.tK, .tC) {
+            If tC.%Get("fromAlt") Continue
+            Do tProps.%Set(tC.name, ..SchemaOf(tC))
+            If 'tC.%Get("opt") Do tReq.%Push(tC.name)
         }
-        Do s.%Set("properties", props)
-        If req.%Size() Do s.%Set("required", req)
-        If $IsObject(pNode.%Get("dep")) && pNode.dep.%GetIterator().%GetNext() Do s.%Set("dependentRequired", pNode.dep)
+        Do tS.%Set("properties", tProps)
+        If tReq.%Size() Do tS.%Set("required", tReq)
+        If $IsObject(pNode.%Get("dep")) && pNode.dep.%GetIterator().%GetNext() Do tS.%Set("dependentRequired", pNode.dep)
         If pNode.%GetTypeOf("additional") = "boolean" {
-            Do s.%Set("additionalProperties", 0, "boolean")
+            Do tS.%Set("additionalProperties", 0, "boolean")
         } ElseIf pNode.%GetTypeOf("additional") = "object" {
-            Do s.%Set("additionalProperties", ..SchemaOf(pNode.additional))
+            Do tS.%Set("additionalProperties", ..SchemaOf(pNode.additional))
         }
         If $IsObject(pNode.%Get("dsch")) && pNode.dsch.%Size() {
-            Set dso = {}
-            Set itx = pNode.dsch.%GetIterator()
-            While itx.%GetNext(.xk, .xe) {
-                If dso.%IsDefined(xe.key) {
-                    Set e = {}, e2 = {}
-                    Do e2.%Set(xe.key, ..SchemaOf(xe.node))
-                    Do e.%Set("dependentSchemas", e2)
-                    Do extra.%Push(e)
+            Set tDso = {}
+            Set tItx = pNode.dsch.%GetIterator()
+            While tItx.%GetNext(.tXk, .tXe) {
+                If tDso.%IsDefined(tXe.key) {
+                    Set tE = {}, tE2 = {}
+                    Do tE2.%Set(tXe.key, ..SchemaOf(tXe.node))
+                    Do tE.%Set("dependentSchemas", tE2)
+                    Do tExtra.%Push(tE)
                 } Else {
-                    Do dso.%Set(xe.key, ..SchemaOf(xe.node))
+                    Do tDso.%Set(tXe.key, ..SchemaOf(tXe.node))
                 }
             }
-            If dso.%GetIterator().%GetNext() Do s.%Set("dependentSchemas", dso)
+            If tDso.%GetIterator().%GetNext() Do tS.%Set("dependentSchemas", tDso)
         }
-        If $IsObject(pNode.%Get("pnames")) Do s.%Set("propertyNames", ..SchemaOf(pNode.pnames))
+        If $IsObject(pNode.%Get("pnames")) Do tS.%Set("propertyNames", ..SchemaOf(pNode.pnames))
         If $IsObject(pNode.%Get("cond")) && pNode.cond.%Size() {
-            Set it = pNode.cond.%GetIterator()
-            While it.%GetNext(.k, .ce) {
-                Set e = {}
-                Do e.%Set("if", ..SchemaOf(ce.%Get("if")))
-                If $IsObject(ce.%Get("then")) Do e.%Set("then", ..SchemaOf(ce.%Get("then")))
-                If $IsObject(ce.%Get("else")) Do e.%Set("else", ..SchemaOf(ce.%Get("else")))
-                Do extra.%Push(e)
+            Set tIt = pNode.cond.%GetIterator()
+            While tIt.%GetNext(.tK, .tCe) {
+                Set tE = {}
+                Do tE.%Set("if", ..SchemaOf(tCe.%Get("if")))
+                If $IsObject(tCe.%Get("then")) Do tE.%Set("then", ..SchemaOf(tCe.%Get("then")))
+                If $IsObject(tCe.%Get("else")) Do tE.%Set("else", ..SchemaOf(tCe.%Get("else")))
+                Do tExtra.%Push(tE)
             }
         }
     } ElseIf pNode.type = "array" {
-        Do s.%Set("items", ..SchemaOf(pNode.items))
-        If $IsObject(pNode.%Get("contains")) Do s.%Set("contains", ..SchemaOf(pNode.contains))
+        Do tS.%Set("items", ..SchemaOf(pNode.items))
+        If $IsObject(pNode.%Get("contains")) Do tS.%Set("contains", ..SchemaOf(pNode.contains))
     }
-    If extra.%Size() Do s.%Set("allOf", extra)
-    Quit s
+    If tExtra.%Size() Do tS.%Set("allOf", tExtra)
+    Quit tS
 }
 
 }

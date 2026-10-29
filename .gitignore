@@ -1,4 +1,4 @@
-/.DS_Store
+**/.DS_Store
 /.vscode
 /Demo
 /JSON Virtual Document (JVDoc) Usage and Maintenance Guide.md
@@ -6,3 +6,8 @@
 /Mapping JSON Graphically in DTL The JSON Virtual Document for InterSystems IRIS.md
 /从零构建一种 Virtual Document 类型：以 JSON 为例.md
 /用 DTL 图形化映射 JSON：InterSystems IRIS 的 JSON Virtual Document.md
+
+# Test-only classes: kept locally and loaded into the demo image, not published
+/src/Test.cls
+/src/UnitTests.cls
+/src/OrderSearch.cls

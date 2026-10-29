@@ -1,0 +1,28 @@
+# JVDoc demo environment: IRIS Community with the TESTBED namespace, JVDoc, the PetStore DocTypes and Demo.JVDoc.Production.
+# The Community image includes a web server on port 52773, which serves the Management Portal and the /PetStore REST endpoint.
+#
+#   docker compose up -d --build
+#   Management Portal:  http://localhost:52773/csp/sys/UtilHome.csp   (SuperUser / SYS)
+#   REST endpoint:      POST http://localhost:52773/PetStore/PetStore/Test   (Content-Type: application/json)
+#
+# Ports and the image can be changed with the variables below, e.g. in a .env file next to this file.
+
+name: jvdoc-demo
+
+services:
+
+  iris:
+    build:
+      context: .
+      dockerfile: docker/iris/Dockerfile
+      args:
+        IRIS_IMAGE: ${IRIS_IMAGE:-containers.intersystems.com/intersystems/iris-community:latest-cd}
+    image: jvdoc-demo-iris
+    container_name: jvdoc-iris
+    hostname: iris
+    ports:
+      # Web server: Management Portal and the /PetStore REST endpoint
+      - "${JVDOC_WEB_PORT:-55773}:52773"
+      # Superserver, for VS Code / ObjectScript clients
+      - "${JVDOC_SUPERSERVER_PORT:-55972}:1972"
+    restart: unless-stopped

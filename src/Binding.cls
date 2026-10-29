@@ -27,15 +27,15 @@ Index PK On (Kind, Pattern) [ IdKey, PrimaryKey, Unique ];
 /// Returns: $$$OK, or the error from saving or deleting the row (removing a binding that does not exist is OK)
 ClassMethod Set(pKind As %String, pPattern As %String, pValue As %String = "") As %Status
 {
-    Set id = pKind_"||"_pPattern
+    Set tId = pKind_"||"_pPattern
     If pValue = "" {
-        If ..%ExistsId(id) Quit ..%DeleteId(id)
+        If ..%ExistsId(tId) Quit ..%DeleteId(tId)
         Quit $$$OK
     }
-    Set b = ..%OpenId(id)
-    If '$IsObject(b) Set b = ..%New(), b.Kind = pKind, b.Pattern = pPattern
-    Set b.Value = pValue
-    Quit b.%Save()
+    Set tB = ..%OpenId(tId)
+    If '$IsObject(tB) Set tB = ..%New(), tB.Kind = pKind, tB.Pattern = pPattern
+    Set tB.Value = pValue
+    Quit tB.%Save()
 }
 
 /// Finds the binding that applies to a DocType: the exact pattern first, then "Cat:*", then "*".<br>
@@ -44,13 +44,13 @@ ClassMethod Set(pKind As %String, pPattern As %String, pValue As %String = "") A
 /// Returns: the bound value (search table class or Identifier path), or "" when nothing matches
 ClassMethod Resolve(pKind As %String, pDocType As %String) As %String
 {
-    Set v = ""
+    Set tV = ""
     If pDocType '= "" {
-        Set v = ..ValueOf(pKind, pDocType)
-        If v = "" Set v = ..ValueOf(pKind, $Piece(pDocType, ":", 1)_":*")
+        Set tV = ..ValueOf(pKind, pDocType)
+        If tV = "" Set tV = ..ValueOf(pKind, $Piece(pDocType, ":", 1)_":*")
     }
-    If v = "" Set v = ..ValueOf(pKind, "*")
-    Quit v
+    If tV = "" Set tV = ..ValueOf(pKind, "*")
+    Quit tV
 }
 
 /// Reads one binding row without locking.<br>
@@ -59,8 +59,8 @@ ClassMethod Resolve(pKind As %String, pDocType As %String) As %String
 /// Returns: the stored value, or "" when the row does not exist
 ClassMethod ValueOf(pKind As %String, pPattern As %String) As %String [ Private ]
 {
-    Set b = ..%OpenId(pKind_"||"_pPattern, 0)
-    Quit $Select($IsObject(b):b.Value, 1:"")
+    Set tB = ..%OpenId(pKind_"||"_pPattern, 0)
+    Quit $Select($IsObject(tB):tB.Value, 1:"")
 }
 
 Storage Default
